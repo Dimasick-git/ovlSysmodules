@@ -246,7 +246,7 @@ inline void drawMemoryWidget(auto renderer) {
         
         if (freeRamMB >= 9.0f){
             ramColor = tsl::healthyRamTextColor;
-        } else if (freeRamMB >= 3.0f) {
+        } else if (freeRamMB >= 4.0f) {
             ramColor = tsl::neutralRamTextColor;
         } else {
             ramColor = tsl::badRamTextColor;
