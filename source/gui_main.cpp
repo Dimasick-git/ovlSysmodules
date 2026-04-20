@@ -254,13 +254,32 @@ inline void drawMemoryWidget(auto renderer) {
         lastUpdateTick = currentTick;
     }
     
-    renderer->drawRect(239, 15, 1, 66, renderer->aWithOpacity(tsl::separatorColor));
-    
+    renderer->drawRect(235, 15, 1, 66, renderer->aWithOpacity(tsl::topSeparatorColor));
+
     if (!ult::hideWidgetBackdrop) {
-        renderer->drawUniformRoundedRect(247, 15, (ult::extendedWidgetBackdrop) ? tsl::cfg::FramebufferWidth - 255 : tsl::cfg::FramebufferWidth - 255 + 40, 66, renderer->a(tsl::widgetBackdropColor));
+        if (!ult::hideWidgetBorder) {
+            renderer->drawUniformRoundedRect(
+                246, 16,
+                (ult::extendedWidgetBackdrop ? tsl::cfg::FramebufferWidth - 255 : tsl::cfg::FramebufferWidth - 215) - 2,
+                64, renderer->a(tsl::widgetBackdropColor)
+            );
+        } else {
+            renderer->drawUniformRoundedRect(
+                245, 15,
+                (ult::extendedWidgetBackdrop ? tsl::cfg::FramebufferWidth - 255 : tsl::cfg::FramebufferWidth - 215),
+                66, renderer->a(tsl::widgetBackdropColor)
+            );
+        }
     }
-    
-    const int backdropCenterX = 247 + ((tsl::cfg::FramebufferWidth - 255) >> 1);
+    if (!ult::hideWidgetBorder) {
+        renderer->drawUniformRoundedRectBorder(
+            245, 15,
+            (ult::extendedWidgetBackdrop ? tsl::cfg::FramebufferWidth - 255 : tsl::cfg::FramebufferWidth - 215),
+            66, 3, renderer->a(tsl::widgetBorderColor)
+        );
+    }
+
+    const int backdropCenterX = 245 + ((tsl::cfg::FramebufferWidth - 255) >> 1);
     
     // First line: "System" label
     size_t y_offset = 44 + 2 - 1;  // Same as the clock y_offset in the reference code
