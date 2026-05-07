@@ -8,12 +8,12 @@ static char pathBuffer[FS_MAX_PATH];
 
 constexpr const char* const descriptions[2][2] = {
     [0] = {
-        [0] = "Off",
-        [1] = "Off",
+        [0] = "Off",
+        [1] = "Off",
     },
     [1] = {
-        [0] = "On",
-        [1] = "On",
+        [0] = "On",
+        [1] = "On",
     },
 };
 
@@ -28,8 +28,10 @@ static char fileBuffer[4096];
 // declared timeout. Returns false in every other case — service unreachable,
 // IPC dispatch failed, or the process was still alive when the deadline hit.
 //
-// Caller MUST follow up with pmshellTerminateProgram on a false return to
-// guarantee the process dies (a frozen sysmodule will return false here).
+// For dynamic modules the caller should follow up with pmshellTerminateProgram
+// on a false return. For static modules with graceful shutdown declared, the
+// caller must NOT force-kill on a false return — the toggle simply won't
+// change state.
 //
 // We never block indefinitely. The polling interval is fixed at 50 ms so a
 // 1 s timeout costs at most ~20 cheap IPC calls to pmdmnt. The cost is paid
@@ -42,11 +44,11 @@ static bool tryGracefulShutdown(const SystemModule& module) {
     Service srv;
     Result rc = smGetService(&srv, module.gracefulShutdownService);
     if (R_FAILED(rc))
-        return false; // Service not registered (sysmodule may not be ready); fall back to force-kill.
+        return false; // Service not registered (sysmodule may not be ready).
 
     // Send the declared command with no input and no output. Any non-default
     // arg shape would risk schema mismatch across versions, so the contract
-    // is intentionally limited to a void → void RPC.
+    // is intentionally limited to a void -> void RPC.
     rc = serviceDispatch(&srv, module.gracefulShutdownCmd);
     serviceClose(&srv);
     if (R_FAILED(rc))
@@ -67,7 +69,7 @@ static bool tryGracefulShutdown(const SystemModule& module) {
         svcSleepThread(pollIntervalNs);
         elapsedNs += pollIntervalNs;
     }
-    return false; // Timed out; caller will force-kill.
+    return false; // Timed out.
 }
 
 GuiMain::GuiMain() {
@@ -163,7 +165,7 @@ GuiMain::GuiMain() {
         
         cJSON* versionItem = cJSON_GetObjectItem(toolboxFileContent, "version");
         if (versionItem && cJSON_IsString(versionItem)) {
-            listItemText += "";
+            listItemText += ult::DIVIDER_SYMBOL;
             listItemText += versionItem->valuestring;
         }
 
@@ -172,15 +174,26 @@ GuiMain::GuiMain() {
         //
         // Sysmodules that own kernel-level state (PCV table mods, hardware
         // overrides, etc.) may declare an IPC endpoint that ovlSysmodules
-        // calls *before* force-killing them, giving the module a chance to
-        // restore that state cleanly. The contract is fully opt-in: any
-        // toolbox.json without these three fields keeps the original
-        // pmshellTerminateProgram-only behavior, and no sysmodule receives
-        // special treatment based on its title ID.
+        // calls before terminating them, giving the module a chance to
+        // restore that state cleanly. The contract is fully opt-in.
         //
-        // All three fields must be present and valid for the contract to
-        // activate. If any are missing or malformed, we silently fall back
-        // to the legacy force-kill path — preserving the previous behavior.
+        // shutdown_service and shutdown_cmd are both required.
+        // shutdown_timeout_ms is optional — defaults to 1000 ms when absent.
+        //
+        // For dynamic modules (requires_reboot: false):
+        //   Graceful shutdown is attempted first; pmshellTerminateProgram is
+        //   the fallback if it fails or times out.
+        //
+        // For static modules (requires_reboot: true) WITH this contract:
+        //   Graceful shutdown is attempted but force-kill is NEVER used as a
+        //   fallback. If the graceful call fails the toggle simply does nothing
+        //   — state is unchanged. This protects users on older ovl-sysmodules
+        //   builds that cannot safely hard-kill the module. These modules are
+        //   shown in the Dynamic section so they can be interacted with, but
+        //   starting them via the overlay is not supported (needs a reboot).
+        //
+        // For static modules WITHOUT this contract:
+        //   Unchanged — shown in the Static section, not interactable.
         // -------------------------------------------------------------------
         bool gracefulOk = false;
         char gracefulSvc[16] = {};
@@ -190,17 +203,22 @@ GuiMain::GuiMain() {
             cJSON* svcItem = cJSON_GetObjectItem(toolboxFileContent, "shutdown_service");
             cJSON* cmdItem = cJSON_GetObjectItem(toolboxFileContent, "shutdown_cmd");
             cJSON* toItem  = cJSON_GetObjectItem(toolboxFileContent, "shutdown_timeout_ms");
+
+            // Only shutdown_service and shutdown_cmd are required.
+            // shutdown_timeout_ms defaults to 1000 ms if absent or invalid.
             if (svcItem && cJSON_IsString(svcItem)
-                && cmdItem && cJSON_IsNumber(cmdItem)
-                && toItem  && cJSON_IsNumber(toItem)) {
+                && cmdItem && cJSON_IsNumber(cmdItem)) {
                 const char* svcStr = svcItem->valuestring;
                 const size_t svcLen = std::strlen(svcStr);
                 // libnx service names are at most 8 bytes (smEncodeName).
-                if (svcLen > 0 && svcLen <= 8 && cmdItem->valueint >= 0 && toItem->valueint > 0) {
+                if (svcLen > 0 && svcLen <= 8 && cmdItem->valueint >= 0) {
                     std::memcpy(gracefulSvc, svcStr, svcLen);
                     gracefulSvc[svcLen] = '\0';
-                    gracefulCmd        = static_cast<u32>(cmdItem->valueint);
-                    gracefulTimeoutMs  = static_cast<u32>(toItem->valueint);
+                    gracefulCmd       = static_cast<u32>(cmdItem->valueint);
+                    // Timeout: use declared value if present and positive, else 1000 ms.
+                    gracefulTimeoutMs = (toItem && cJSON_IsNumber(toItem) && toItem->valueint > 0)
+                                        ? static_cast<u32>(toItem->valueint)
+                                        : 1000;
                     gracefulOk = true;
                 }
             }
@@ -232,41 +250,69 @@ GuiMain::GuiMain() {
         std::snprintf(module.folderPath, FS_MAX_PATH, boot2FlagFolder, module.programId);
 
         module.listItem->setClickListener([this, module](u64 click) -> bool {
-            if (module.needReboot) {
+            // Static modules without a graceful-shutdown contract cannot be
+            // toggled at runtime — show the lock and ignore KEY_A entirely.
+            // Static modules WITH a contract skip the lock (they live in the
+            // Dynamic section and are handled in the KEY_A branch below).
+            if (module.needReboot && !module.hasGracefulShutdown) {
                 module.listItem->isLocked = true;
             }
-            
-            if (click & KEY_A && !module.needReboot) {
-                if (this->isRunning(module)) {
-                    /* Try cooperative shutdown first if the module declared support
-                     * for it in its toolbox.json. tryGracefulShutdown returns true
-                     * only on confirmed exit within the declared timeout. */
-                    bool exited = tryGracefulShutdown(module);
 
-                    /* Force-kill fallback. Always runs when:
-                     *   - the module didn't declare graceful shutdown (legacy path)
-                     *   - the IPC failed (service down, dispatch error)
-                     *   - the module is frozen (timed out — and the user wants it dead)
-                     * isRunning() re-check avoids a redundant terminate call in the
-                     * (small) race where the process exited between the timeout and
-                     * here. */
-                    if (!exited && this->isRunning(module)) {
-                        pmshellTerminateProgram(module.programId);
+            if (click & KEY_A) {
+                if (!module.needReboot) {
+                    // -----------------------------------------------------------
+                    // Dynamic module — full toggle with graceful-first, force-kill
+                    // fallback.
+                    // -----------------------------------------------------------
+                    if (this->isRunning(module)) {
+                        bool exited = tryGracefulShutdown(module);
+
+                        // Force-kill fallback for dynamic modules only.
+                        // isRunning() re-check avoids a redundant terminate call
+                        // in the race where the process exited between the timeout
+                        // expiry and here.
+                        if (!exited && this->isRunning(module)) {
+                            pmshellTerminateProgram(module.programId);
+                        }
+                    } else {
+                        /* Start process. */
+                        const NcmProgramLocation programLocation{
+                            .program_id = module.programId,
+                            .storageID = NcmStorageId_None,
+                        };
+                        u64 pid = 0;
+                        pmshellLaunchProgram(0, &programLocation, &pid);
                     }
-                } else {
-                    /* Start process. */
-                    const NcmProgramLocation programLocation{
-                        .program_id = module.programId,
-                        .storageID = NcmStorageId_None,
-                    };
-                    u64 pid = 0;
-                    pmshellLaunchProgram(0, &programLocation, &pid);
+                    return true;
+
+                } else if (module.hasGracefulShutdown) {
+                    // -----------------------------------------------------------
+                    // Static module WITH graceful-shutdown contract.
+                    // Can be started and stopped via the overlay.
+                    // On stop: graceful shutdown only — NEVER force-kill.
+                    //   If the call fails or times out, the toggle does nothing
+                    //   and state is unchanged.
+                    // On start: launch normally via pmshell.
+                    // -----------------------------------------------------------
+                    if (this->isRunning(module)) {
+                        tryGracefulShutdown(module);
+                        // Whether it succeeded or failed, the key was handled.
+                        // GuiMain::update() will reflect actual state next tick.
+                    } else {
+                        const NcmProgramLocation programLocation{
+                            .program_id = module.programId,
+                            .storageID = NcmStorageId_None,
+                        };
+                        u64 pid = 0;
+                        pmshellLaunchProgram(0, &programLocation, &pid);
+                    }
+                    return true;
                 }
-                return true;
             }
 
             if (click & KEY_Y) {
-                // Use cached paths
+                // Boot2 flag toggle — available for all modules regardless of
+                // whether they support runtime toggling.
                 if (this->hasFlag(module)) {
                     /* Remove boot2 flag file. */
                     std::remove(module.flagPath);
@@ -434,28 +480,35 @@ tsl::elm::Element* GuiMain::createUI() {
     } else {
         tsl::elm::List* sysmoduleList = new tsl::elm::List();
 
-        sysmoduleList->addItem(new tsl::elm::CategoryHeader("Dynamic   Auto Start   Toggle", true));
+        // Dynamic section: truly dynamic modules (!needReboot) AND static
+        // modules that declared a graceful-shutdown contract. The latter can
+        // be stopped safely at runtime even though they require a reboot to
+        // start; grouping them here makes them interactable in the overlay.
+        sysmoduleList->addItem(new tsl::elm::CategoryHeader("Dynamic   Auto Start   Toggle", true));
         sysmoduleList->addItem(new tsl::elm::CustomDrawer([](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
-            renderer->drawString(" These sysmodules can be toggled at any time.", false, x + 5, y + 13, 15, tsl::warningTextColor);
+            renderer->drawString(" These sysmodules can be toggled at any time.", false, x + 5, y + 13, 15, tsl::warningTextColor);
         }), 30);
         for (const auto& module : this->m_sysmoduleListItems) {
-            if (!module.needReboot) {
+            if (!module.needReboot || module.hasGracefulShutdown) {
                 module.listItem->enableShortHoldKey();
                 sysmoduleList->addItem(module.listItem);
             }
         }
 
-        sysmoduleList->addItem(new tsl::elm::CategoryHeader("Static   Auto Start", true));
+        // Static section: modules that require a reboot AND have no
+        // graceful-shutdown contract. These cannot be toggled at runtime.
+        sysmoduleList->addItem(new tsl::elm::CategoryHeader("Static   Auto Start", true));
         sysmoduleList->addItem(new tsl::elm::CustomDrawer([](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
-            renderer->drawString(" These sysmodules need a reboot to work.", false, x + 5, y + 13, 15, tsl::warningTextColor);
+            renderer->drawString(" These sysmodules need a reboot to work.", false, x + 5, y + 13, 15, tsl::warningTextColor);
         }), 30);
         for (const auto& module : this->m_sysmoduleListItems) {
-            if (module.needReboot) {
+            if (module.needReboot && !module.hasGracefulShutdown) {
                 module.listItem->enableShortHoldKey();
                 module.listItem->disableClickAnimation();
                 sysmoduleList->addItem(module.listItem);
             }
         }
+
         rootFrame->setContent(sysmoduleList);
     }
 
