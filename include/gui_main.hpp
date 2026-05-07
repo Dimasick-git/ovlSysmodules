@@ -14,6 +14,17 @@ struct SystemModule {
     char folderPath[FS_MAX_PATH];  // Cached flags folder path
     std::string displayName;       // Store original name + version
     std::string titleIdStr;        // Store formatted title ID
+
+    // Optional graceful-shutdown contract (read from toolbox.json).
+    // If hasGracefulShutdown is true, we attempt an IPC-driven cleanup
+    // before pmshellTerminateProgram; if absent or it fails/times out,
+    // we fall back to instant force-kill (the original behavior).
+    // This makes the graceful path completely opt-in per sysmodule —
+    // ovlSysmodules never hardcodes knowledge of any specific module.
+    bool hasGracefulShutdown = false;
+    char gracefulShutdownService[16] = {};  // libnx service name limit is 8 chars + null
+    u32  gracefulShutdownCmd = 0;
+    u32  gracefulShutdownTimeoutMs = 1000;
 };
 
 class GuiMain : public tsl::Gui {
