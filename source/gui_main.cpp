@@ -8,12 +8,12 @@ static char pathBuffer[FS_MAX_PATH];
 
 constexpr const char* const descriptions[2][2] = {
     [0] = {
-        [0] = "Off",
-        [1] = "Off",
+        [0] = "Off",
+        [1] = "Off",
     },
     [1] = {
-        [0] = "On",
-        [1] = "On",
+        [0] = "On",
+        [1] = "On",
     },
 };
 
