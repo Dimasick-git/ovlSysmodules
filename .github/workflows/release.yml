@@ -1,0 +1,149 @@
+name: Release
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+    branches:
+      - main
+    paths:
+      - 'Makefile'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create (e.g. v1.5.2). Empty to use existing tags only.'
+        required: false
+        default: ''
+
+jobs:
+  release:
+    name: Build & publish GitHub Release
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout (with submodules and tags)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          set -e
+          APP_VERSION=$(grep -E '^APP_VERSION\s*:=' Makefile | sed -E 's/.*:=\s*//;s/\s*$//')
+          echo "APP_VERSION=$APP_VERSION" >> $GITHUB_ENV
+
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+            echo "Source: workflow_dispatch input"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "Source: pushed tag"
+          else
+            # Makefile change on main: derive tag from APP_VERSION, bump
+            # patch if that tag already exists.
+            TAG="v${APP_VERSION}"
+            if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+              BASE="${TAG%.*}"
+              PATCH="${TAG##*.}"
+              PATCH=$((PATCH + 1))
+              TAG="${BASE}.${PATCH}"
+              while git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; do
+                PATCH=$((PATCH + 1))
+                TAG="${BASE}.${PATCH}"
+              done
+            fi
+            echo "Source: Makefile change, derived tag"
+          fi
+          echo "Release tag: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Create & push tag (if not pre-existing)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="${{ steps.tag.outputs.tag }}"
+          if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            git config user.name  'github-actions[bot]'
+            git config user.email 'github-actions[bot]@users.noreply.github.com'
+            git tag -a "$TAG" -m "Release $TAG (auto)"
+            git push origin "$TAG"
+          fi
+
+      - name: make
+        run: make -j$(nproc)
+
+      - name: Package dist zip
+        id: zip
+        run: |
+          set -e
+          TAG="${{ steps.tag.outputs.tag }}"
+          NAME="ovlSysmodules-${APP_VERSION}-${GITHUB_SHA::7}"
+          DIST="dist/${NAME}"
+          mkdir -p "${DIST}/switch/.overlays"
+          mkdir -p "${DIST}/config/ryazhahand/ovlSysmodules/lang"
+          cp ovlSysmodules.ovl "${DIST}/switch/.overlays/"
+          cp lang/*.json        "${DIST}/config/ryazhahand/ovlSysmodules/lang/"
+          (cd dist && zip -r "${NAME}.zip" "${NAME}")
+          (cd dist && sha256sum "${NAME}.zip" > "${NAME}.zip.sha256")
+          echo "path=dist/${NAME}.zip" >> $GITHUB_OUTPUT
+          echo "name=${NAME}.zip" >> $GITHUB_OUTPUT
+          echo "sha256=$(cut -d' ' -f1 < dist/${NAME}.zip.sha256)" >> $GITHUB_OUTPUT
+
+      - name: Extract changelog section
+        id: changelog
+        run: |
+          set -e
+          TAG="${{ steps.tag.outputs.tag }}"
+          TAG_NO_V="${TAG#v}"
+          BODY=$(awk -v tag="$TAG_NO_V" '
+            $0 ~ "^## \\[" tag "\\]" {flag=1; next}
+            flag && /^## \[/ {flag=0}
+            flag {print}
+          ' CHANGELOG.md)
+          if [ -z "$BODY" ]; then
+            BODY="Auto-built release. See [CHANGELOG.md](CHANGELOG.md) for full history."
+          fi
+          {
+            echo 'body<<EOF'
+            echo "$BODY"
+            echo ''
+            echo '---'
+            echo ''
+            echo "**SHA-256**: \`${{ steps.zip.outputs.sha256 }}\`"
+            echo "**Built from**: \`${GITHUB_SHA::7}\`"
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ovlSysmodules ${{ steps.tag.outputs.tag }} (Ryazhenka)
+          body: ${{ steps.changelog.outputs.body }}
+          files: |
+            ${{ steps.zip.outputs.path }}
+            dist/${{ steps.zip.outputs.name }}.sha256
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

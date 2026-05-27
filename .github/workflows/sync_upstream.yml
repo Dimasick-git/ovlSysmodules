@@ -1,0 +1,133 @@
+name: Sync from upstream
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    name: Pull ppkantorski/ovl-sysmodules into a sync branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name  'ryazhenka-sync-bot'
+          git config user.email 'ryazhenka-sync-bot@users.noreply.github.com'
+
+      - name: Add upstream remote & fetch
+        run: |
+          git remote add upstream https://github.com/ppkantorski/ovl-sysmodules.git
+          git fetch upstream master --tags
+
+      - name: Check whether sync is needed
+        id: check
+        run: |
+          set -e
+          BEHIND=$(git rev-list --count main..upstream/master)
+          echo "Commits behind upstream: $BEHIND"
+          echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+
+      - name: Create sync branch
+        if: steps.check.outputs.behind != '0'
+        id: branch
+        run: |
+          set -e
+          DATE=$(date -u +%Y-%m-%d)
+          BRANCH="sync/upstream-$DATE"
+          git checkout -B "$BRANCH" main
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Merge upstream (favour ours for protected paths)
+        if: steps.check.outputs.behind != '0'
+        id: merge
+        run: |
+          set -e
+          if git merge --no-ff --no-edit upstream/master; then
+            echo "clean=true" >> $GITHUB_OUTPUT
+          else
+            echo "Conflicts; auto-resolving protected paths to 'ours'..."
+            while IFS= read -r path; do
+              [[ -z "$path" || "$path" == \#* ]] && continue
+              for f in $(git ls-files --unmerged | awk '{print $4}' | sort -u); do
+                case "$f" in
+                  $path)
+                    echo "  keeping ours: $f"
+                    git checkout --ours -- "$f"
+                    git add "$f"
+                    ;;
+                esac
+              done
+            done < .github/sync-protected-paths.txt
+            if git ls-files --unmerged | grep -q .; then
+              echo "Non-protected conflicts remain — committing for manual review in PR."
+              git commit --no-edit -a || true
+              echo "clean=false" >> $GITHUB_OUTPUT
+            else
+              git commit --no-edit
+              echo "clean=true" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Push sync branch
+        if: steps.check.outputs.behind != '0'
+        run: git push --force-with-lease origin "${{ steps.branch.outputs.branch }}"
+
+      - name: Open pull request
+        if: steps.check.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          BRANCH="${{ steps.branch.outputs.branch }}"
+          BEHIND="${{ steps.check.outputs.behind }}"
+          CLEAN="${{ steps.merge.outputs.clean }}"
+          TITLE="Sync upstream ($BEHIND new commits) — $(date -u +%Y-%m-%d)"
+          UPSTREAM_LOG=$(git log --oneline main..upstream/master | head -50)
+          if [ "$CLEAN" = "true" ]; then
+            STATUS="Auto-merge clean ✅ — ready to merge after CI passes."
+          else
+            STATUS="⚠️ Merge had conflicts. Protected paths auto-resolved to 'ours'; non-protected conflicts left inline for manual fix."
+          fi
+          BODY=$(cat <<EOF
+          Automated daily sync from \`ppkantorski/ovl-sysmodules:master\`.
+
+          **Commits behind**: $BEHIND
+          **Status**: $STATUS
+
+          ## Upstream commits in this sync
+
+          \`\`\`
+          $UPSTREAM_LOG
+          \`\`\`
+
+          ## Protected files
+
+          Ryazhenka-specific patches (i18n source/cpp, lang/, README/CHANGELOG/docs, CI workflows, submodule URL, branded Makefile) are listed in [\`.github/sync-protected-paths.txt\`](.github/sync-protected-paths.txt) and preserved automatically.
+
+          ---
+
+          _Opened by \`sync_upstream.yml\`. Close without merging if upstream changes shouldn't be adopted._
+          EOF
+          )
+          EXISTING=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' || echo "")
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body "$BODY"
+            echo "Updated existing PR #$EXISTING"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$TITLE" --body "$BODY"
+          fi

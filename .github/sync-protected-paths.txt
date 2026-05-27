@@ -1,0 +1,38 @@
+# Файлы и директории, которые daily sync-бот защищает от перетирания
+# upstream-изменениями. При конфликте оставляется наша версия.
+#
+# Один путь на строку. Поддерживается glob через **.
+# Комментарии начинаются с #.
+
+# Документация форка (наша)
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+docs/RU/**
+
+# CI/CD (наше)
+.github/workflows/**
+.github/sync-protected-paths.txt
+
+# Локальный сборщик
+scripts/**
+
+# i18n (наш main patch)
+source/ovls_lang.cpp
+include/ovls_lang.hpp
+lang/**
+
+# Наш main.cpp - добавили вызов loadLanguage в initServices
+source/main.cpp
+
+# Наш gui_main.cpp - заменили string literals на ovls::* refs
+source/gui_main.cpp
+
+# Submodule swap libultrahand -> libryazhahand
+.gitmodules
+
+# Reproducible builds across OSes
+.gitattributes
+
+# Makefile - APP_TITLE branded + include path → libryazhahand
+Makefile

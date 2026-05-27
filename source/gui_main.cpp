@@ -1,4 +1,5 @@
 #include "gui_main.hpp"
+#include "ovls_lang.hpp"
 
 constexpr const char* const amsContentsPath = "/atmosphere/contents";
 constexpr const char* const boot2FlagFormat = "/atmosphere/contents/%016lX/flags/boot2.flag";
@@ -6,16 +7,16 @@ constexpr const char* const boot2FlagFolder = "/atmosphere/contents/%016lX/flags
 
 static char pathBuffer[FS_MAX_PATH];
 
-constexpr const char* const descriptions[2][2] = {
-    [0] = {
-        [0] = "Off",
-        [1] = "Off",
-    },
-    [1] = {
-        [0] = "On",
-        [1] = "On",
-    },
-};
+// Ryazhenka: replaced upstream's [running][hasFlag] descriptions
+// table with statusDescription() that builds the displayed string
+// from a stable Switch-glyph prefix (off/on flag indicator) plus a
+// localised "On"/"Off" suffix (rebound by ovls::loadLanguage()).
+static const char *statusDescription(bool running, bool hasFlag) {
+    static thread_local std::string buf;
+    buf.assign(hasFlag ? ovls::ICON_FLAG : ovls::ICON_NO_FLAG);
+    buf += (running ? ovls::ON_LABEL : ovls::OFF_LABEL);
+    return buf.c_str();
+}
 
 // Pre-allocate buffer for file reading to avoid repeated allocations
 static char fileBuffer[4096];
@@ -462,14 +463,14 @@ inline void drawMemoryWidget(auto renderer) {
 tsl::elm::Element* GuiMain::createUI() {
     auto* rootFrame = new tsl::elm::HeaderOverlayFrame(97);
     rootFrame->setHeader(new tsl::elm::CustomDrawer([this](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
-        renderer->drawString("Sysmodules", false, 20, 52, 32, tsl::defaultOverlayColor);
+        renderer->drawString(ovls::OVERLAY_TITLE.c_str(), false, 20, 52, 32, tsl::defaultOverlayColor);
         renderer->drawString(VERSION, false, 20, 75, 15, tsl::bannerVersionTextColor);
 
         drawMemoryWidget(renderer);
     }));
 
     if (this->m_sysmoduleListItems.size() == 0) {
-        const char* description = this->m_scanned ? "No sysmodules found!" : "Scan failed!";
+        const std::string description = this->m_scanned ? ovls::NO_SYSMODULES_FOUND : ovls::SCAN_FAILED;
 
         auto* warning = new tsl::elm::CustomDrawer([description](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
             renderer->drawString("\uE150", false, 180, 250, 90, tsl::headerTextColor);
@@ -484,10 +485,13 @@ tsl::elm::Element* GuiMain::createUI() {
         // modules that declared a graceful-shutdown contract. The latter can
         // be stopped safely at runtime even though they require a reboot to
         // start; grouping them here makes them interactable in the overlay.
-        sysmoduleList->addItem(new tsl::elm::CategoryHeader("Dynamic   Auto Start   Toggle", true));
-        sysmoduleList->addItem(new tsl::elm::CustomDrawer([](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
-            renderer->drawString(" These sysmodules can be toggled at any time.", false, x + 5, y + 13, 15, tsl::warningTextColor);
-        }), 30);
+        sysmoduleList->addItem(new tsl::elm::CategoryHeader(ovls::DYNAMIC_HEADER, true));
+        {
+            const std::string dynHint = ovls::DYNAMIC_HINT;
+            sysmoduleList->addItem(new tsl::elm::CustomDrawer([dynHint](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
+                renderer->drawString(dynHint.c_str(), false, x + 5, y + 13, 15, tsl::warningTextColor);
+            }), 30);
+        }
         for (const auto& module : this->m_sysmoduleListItems) {
             if (!module.needReboot || module.hasGracefulShutdown) {
                 module.listItem->enableShortHoldKey();
@@ -497,10 +501,13 @@ tsl::elm::Element* GuiMain::createUI() {
 
         // Static section: modules that require a reboot AND have no
         // graceful-shutdown contract. These cannot be toggled at runtime.
-        sysmoduleList->addItem(new tsl::elm::CategoryHeader("Static   Auto Start", true));
-        sysmoduleList->addItem(new tsl::elm::CustomDrawer([](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
-            renderer->drawString(" These sysmodules need a reboot to work.", false, x + 5, y + 13, 15, tsl::warningTextColor);
-        }), 30);
+        sysmoduleList->addItem(new tsl::elm::CategoryHeader(ovls::STATIC_HEADER, true));
+        {
+            const std::string statHint = ovls::STATIC_HINT;
+            sysmoduleList->addItem(new tsl::elm::CustomDrawer([statHint](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
+                renderer->drawString(statHint.c_str(), false, x + 5, y + 13, 15, tsl::warningTextColor);
+            }), 30);
+        }
         for (const auto& module : this->m_sysmoduleListItems) {
             if (module.needReboot && !module.hasGracefulShutdown) {
                 module.listItem->enableShortHoldKey();
@@ -572,8 +579,7 @@ void GuiMain::updateStatus(const SystemModule &module) {
     const bool running = this->isRunning(module);
     const bool hasFlag = this->hasFlag(module);
 
-    const char* desc = descriptions[running][hasFlag];
-    module.listItem->setValue(desc, !running);
+    module.listItem->setValue(statusDescription(running, hasFlag), !running);
 }
 
 bool GuiMain::hasFlag(const SystemModule &module) {

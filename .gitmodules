@@ -1,3 +1,3 @@
-[submodule "libs/libultrahand"]
-	path = libs/libultrahand
-	url = https://github.com/ppkantorski/libultrahand
+[submodule "libs/libryazhahand"]
+	path = libs/libryazhahand
+	url = https://github.com/Dimasick-git/libryazhahand.git

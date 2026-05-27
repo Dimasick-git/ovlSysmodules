@@ -37,7 +37,8 @@ include $(DEVKITPRO)/libnx/switch_rules
 #   of a homebrew executable (.nro). This is intended to be used for sysmodules.
 #   NACP building is skipped as well.
 #---------------------------------------------------------------------------------
-APP_TITLE	:=	Sysmodules
+APP_TITLE	:=	Sysmodules (Ryazhenka)
+APP_AUTHOR	:=	Dimasick-git (Ryazhenka fork of ppkantorski/ovl-sysmodules)
 APP_VERSION	:=	1.5.1
 
 TARGET		:=	ovlSysmodules
@@ -46,8 +47,10 @@ SOURCES		:=	source
 DATA		:=	data
 INCLUDES	:=  include
 
-# This location should reflect where you place the libultrahand directory (lib can vary between projects).
-include ${TOPDIR}/libs/libultrahand/ultrahand.mk
+# Ryazhenka: swapped ppkantorski/libultrahand for our drop-in fork
+# Dimasick-git/libryazhahand (same API/namespaces, /config/ryazhahand/
+# config path, RYZHAND_* symbol prefix).
+include ${TOPDIR}/libs/libryazhahand/ryazhahand.mk
 
 
 #ifeq ($(RELEASE),)
@@ -215,11 +218,16 @@ DEPENDS	:=	$(OFILES:.o=.d)
 #---------------------------------------------------------------------------------
 all	:	 $(OUTPUT).ovl
 
-$(OUTPUT).ovl: $(OUTPUT).elf $(OUTPUT).nacp 
+$(OUTPUT).ovl: $(OUTPUT).elf $(OUTPUT).nacp
 	@elf2nro $< $@ $(NROFLAGS)
 	@echo "built ... $(notdir $(OUTPUT).ovl)"
-	@printf 'ULTR' >> $@
-	@printf "Ultrahand signature has been added.\n"
+	# Ryazhenka: changed trailing 4-byte signature from 'ULTR' (Ultrahand)
+	# to 'RYZH' (Ryazhahand) so overlay-managers in the Ryazha stack
+	# (Ryazhahand-Overlay, nx-ovlloader visualisers) recognise this as a
+	# Ryazha-native overlay. nx-ovlloader itself does not validate the
+	# trailing bytes, so changing the magic does not break loading.
+	@printf 'RYZH' >> $@
+	@printf "Ryazhahand signature has been added.\n"
 
 $(OUTPUT).elf	:	$(OFILES)
 

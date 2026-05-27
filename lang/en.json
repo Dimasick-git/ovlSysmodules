@@ -1,0 +1,11 @@
+{
+    "OVERLAY_TITLE": "Sysmodules",
+    "ON_LABEL": "On",
+    "OFF_LABEL": "Off",
+    "NO_SYSMODULES_FOUND": "No sysmodules found!",
+    "SCAN_FAILED": "Scan failed!",
+    "DYNAMIC_HEADER": "Dynamic   Auto Start   Toggle",
+    "DYNAMIC_HINT": " These sysmodules can be toggled at any time.",
+    "STATIC_HEADER": "Static   Auto Start",
+    "STATIC_HINT": " These sysmodules need a reboot to work."
+}

@@ -1,0 +1,63 @@
+name: Build
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'docs/**'
+      - '.github/sync-protected-paths.txt'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ovlSysmodules.ovl
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Show APP_VERSION
+        run: |
+          APP_VERSION=$(grep -E '^APP_VERSION\s*:=' Makefile | sed -E 's/.*:=\s*//;s/\s*$//')
+          echo "APP_VERSION=$APP_VERSION" >> $GITHUB_ENV
+          echo "Building APP_VERSION=$APP_VERSION"
+
+      - name: make
+        run: make -j$(nproc)
+
+      - name: Package dist zip
+        run: |
+          set -e
+          DIST="dist/ovlSysmodules-${APP_VERSION}-${GITHUB_SHA::7}"
+          mkdir -p "${DIST}/switch/.overlays"
+          mkdir -p "${DIST}/config/ryazhahand/ovlSysmodules/lang"
+          cp ovlSysmodules.ovl "${DIST}/switch/.overlays/"
+          cp lang/*.json        "${DIST}/config/ryazhahand/ovlSysmodules/lang/"
+          (cd dist && zip -r "ovlSysmodules-${APP_VERSION}-${GITHUB_SHA::7}.zip" "ovlSysmodules-${APP_VERSION}-${GITHUB_SHA::7}")
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ovlSysmodules-${{ env.APP_VERSION }}-${{ github.run_number }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 30
