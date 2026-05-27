@@ -4,36 +4,28 @@ defaults:
   run:
     shell: bash
 
-concurrency:
-  group: release-${{ github.ref_name }}
-  cancel-in-progress: false
-
 on:
   push:
-    tags:
-      - 'v*.*.*'
-    branches:
-      - main
-    paths:
-      - 'Makefile'
+    branches: [main]
+    tags: ['v*.*.*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to create (e.g. v1.5.2). Empty to use existing tags only.'
-        required: false
-        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
-    name: Build & publish GitHub Release
+    name: Build & publish release if APP_VERSION changed
     runs-on: ubuntu-latest
     container:
       image: devkitpro/devkita64:latest
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout (with submodules and tags)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -43,63 +35,60 @@ jobs:
       - name: Mark workspace as safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Install extra switch libs (libpng, minizip)
+      - name: Install switch libs
         run: dkp-pacman -S --noconfirm --needed switch-libpng switch-curl switch-zziplib switch-mbedtls switch-libjpeg-turbo
 
-      - name: Determine release tag
+      - name: Resolve target tag and check if release exists
         id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           APP_VERSION=$(grep -E '^APP_VERSION\s*:=' Makefile | sed -E 's/.*:=\s*//;s/\s*$//')
-          echo "APP_VERSION=$APP_VERSION" >> $GITHUB_ENV
-
-          if [ -n "${{ inputs.tag }}" ]; then
-            TAG="${{ inputs.tag }}"
-            echo "Source: workflow_dispatch input"
-          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-            echo "Source: pushed tag"
-          else
-            # Makefile change on main: derive tag from APP_VERSION, bump
-            # patch if that tag already exists.
-            TAG="v${APP_VERSION}"
-            if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
-              BASE="${TAG%.*}"
-              PATCH="${TAG##*.}"
-              PATCH=$((PATCH + 1))
-              TAG="${BASE}.${PATCH}"
-              while git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; do
-                PATCH=$((PATCH + 1))
-                TAG="${BASE}.${PATCH}"
-              done
-            fi
-            echo "Source: Makefile change, derived tag"
+          if [ -z "$APP_VERSION" ]; then
+            echo "::error::Could not extract APP_VERSION from Makefile."
+            exit 1
           fi
-          echo "Release tag: $TAG"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Create & push tag (if not pre-existing)
-        if: "!startsWith(github.ref, 'refs/tags/')"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="v${APP_VERSION}"
+          fi
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — skipping (idempotent)."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Will publish: $TAG"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+
+      - name: Create & push tag
+        if: steps.tag.outputs.should_release == 'true' && !startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           TAG="${{ steps.tag.outputs.tag }}"
           if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
-            git config user.name  'github-actions[bot]'
-            git config user.email 'github-actions[bot]@users.noreply.github.com'
-            git tag -a "$TAG" -m "Release $TAG (auto)"
+            git config user.name  'ryazhahand-release-bot'
+            git config user.email 'ryazhahand-release-bot@users.noreply.github.com'
+            git tag -a "$TAG" -m "Auto-release on APP_VERSION change: $TAG"
             git push origin "$TAG"
           fi
 
       - name: make
+        if: steps.tag.outputs.should_release == 'true'
         run: make -j$(nproc)
 
-      - name: Package dist zip
+      - name: Package SD-layout zip
         id: zip
+        if: steps.tag.outputs.should_release == 'true'
         run: |
           set -e
-          TAG="${{ steps.tag.outputs.tag }}"
           NAME="ovlSysmodules-${APP_VERSION}-${GITHUB_SHA::7}"
           DIST="dist/${NAME}"
           mkdir -p "${DIST}/switch/.overlays"
@@ -108,18 +97,19 @@ jobs:
           cp lang/*.json        "${DIST}/config/ryazhahand/ovlSysmodules/lang/"
           (cd dist && zip -r "${NAME}.zip" "${NAME}")
           (cd dist && sha256sum "${NAME}.zip" > "${NAME}.zip.sha256")
-          echo "path=dist/${NAME}.zip" >> $GITHUB_OUTPUT
-          echo "name=${NAME}.zip" >> $GITHUB_OUTPUT
-          echo "sha256=$(cut -d' ' -f1 < dist/${NAME}.zip.sha256)" >> $GITHUB_OUTPUT
+          echo "path=dist/${NAME}.zip"  >> "$GITHUB_OUTPUT"
+          echo "name=${NAME}.zip"        >> "$GITHUB_OUTPUT"
+          echo "sha256=$(cut -d' ' -f1 < dist/${NAME}.zip.sha256)" >> "$GITHUB_OUTPUT"
 
       - name: Extract changelog section
         id: changelog
+        if: steps.tag.outputs.should_release == 'true'
         run: |
           set -e
           TAG="${{ steps.tag.outputs.tag }}"
           TAG_NO_V="${TAG#v}"
           BODY=$(awk -v tag="$TAG_NO_V" '
-            $0 ~ "^## \\[" tag "\\]" {flag=1; next}
+            $0 ~ "^## \[" tag "\]" {flag=1; next}
             flag && /^## \[/ {flag=0}
             flag {print}
           ' CHANGELOG.md)
@@ -127,17 +117,18 @@ jobs:
             BODY="Auto-built release. See [CHANGELOG.md](CHANGELOG.md) for full history."
           fi
           {
-            echo 'body<<EOF'
+            echo 'body<<DELIM'
             echo "$BODY"
             echo ''
             echo '---'
             echo ''
             echo "**SHA-256**: \`${{ steps.zip.outputs.sha256 }}\`"
             echo "**Built from**: \`${GITHUB_SHA::7}\`"
-            echo 'EOF'
-          } >> $GITHUB_OUTPUT
+            echo 'DELIM'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
+        if: steps.tag.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
