@@ -15,7 +15,7 @@ class OverlaySysmodules : public tsl::Overlay {
         // matching lang/<code>.json. set:sys is part of the standard
         // Tesla init bundle so it's safe to call here.
         u64 langCode = 0;
-        SetLanguage lang = SetLanguage_AmericanEnglish;
+        SetLanguage lang = SetLanguage_ENUS;
         if (R_SUCCEEDED(setInitialize())) {
             if (R_SUCCEEDED(setGetSystemLanguage(&langCode))) {
                 setMakeLanguage(langCode, &lang);
@@ -23,7 +23,7 @@ class OverlaySysmodules : public tsl::Overlay {
             setExit();
         }
         switch (lang) {
-            case SetLanguage_Russian: ovls::loadLanguage("ru"); break;
+            case SetLanguage_RU: ovls::loadLanguage("ru"); break;
             default:                  ovls::loadLanguage("en"); break;
         }
     }
