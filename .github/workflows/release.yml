@@ -44,7 +44,7 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install extra switch libs (libpng, minizip)
-        run: dkp-pacman -S --noconfirm --needed switch-libpng switch-libcurl switch-libzzip switch-mbedtls switch-libjpeg-turbo
+        run: dkp-pacman -S --noconfirm --needed switch-libpng switch-curl switch-zziplib switch-mbedtls switch-libjpeg-turbo
 
       - name: Determine release tag
         id: tag
