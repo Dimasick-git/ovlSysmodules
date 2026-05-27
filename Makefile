@@ -88,7 +88,11 @@ CXXFLAGS := $(CFLAGS) -std=c++26 -Wno-dangling-else -ffast-math
 ASFLAGS := $(ARCH)
 LDFLAGS += -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS := -lcurl -lz -lzzip -lmbedtls -lmbedx509 -lmbedcrypto -lnx
+# Ryazhenka: added -lpng16 (libryazhahand pulls in loadPngToRGBA4444 for
+# PNG wallpapers — was raw .rgba in libultrahand) and -lminizip
+# (referenced by libryazhahand's archive helpers). Kept -lzzip from
+# upstream in case other libraries in the chain still pull it in.
+LIBS := -lpng16 -lcurl -lz -lzzip -lminizip -lmbedtls -lmbedx509 -lmbedcrypto -lnx
 
 CXXFLAGS += -fno-exceptions -ffunction-sections -fdata-sections -fno-rtti
 LDFLAGS += -Wl,--gc-sections -Wl,--as-needed
