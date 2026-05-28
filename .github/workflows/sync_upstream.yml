@@ -32,7 +32,7 @@ jobs:
       - name: Add upstream remote & fetch
         run: |
           git remote add upstream https://github.com/ppkantorski/ovl-sysmodules.git
-          git fetch upstream master --tags
+          git fetch upstream master
 
       - name: Check whether sync is needed
         id: check
