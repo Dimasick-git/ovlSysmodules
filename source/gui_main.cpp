@@ -96,8 +96,7 @@ GuiMain::GuiMain() {
         if (entry->d_type != DT_DIR)
             continue;
 
-        // Fast path filtering using pointer comparison
-        if (*(uint32_t*)entry->d_name == *(uint32_t*)&"0100" && *(uint64_t*)(&entry->d_name[4]) != *(uint64_t*)&"00000000")
+        if (strncmp(entry->d_name, "0100", 4) == 0 && strncmp(entry->d_name + 4, "00000000", 8) != 0)
             continue;
 
         // Build toolbox.json path
