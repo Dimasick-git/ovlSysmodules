@@ -23,53 +23,55 @@ static char fileBuffer[4096];
 // ----------------------------------------------------------------------------
 // tryGracefulShutdown
 //
-// Attempts cooperative shutdown via the IPC contract declared in the module's
-// toolbox.json. Returns true only if the process actually exited within the
-// declared timeout. Returns false in every other case — service unreachable,
-// IPC dispatch failed, or the process was still alive when the deadline hit.
+// Sends the declared void->void IPC command to the module, then polls pmdmnt
+// waiting for the process to unload. Returns true only if the process actually
+// exited. Returns false if the service is not registered, the dispatch fails,
+// or the process is still alive after the polling window.
 //
-// For dynamic modules the caller should follow up with pmshellTerminateProgram
-// on a false return. For static modules with graceful shutdown declared, the
-// caller must NOT force-kill on a false return — the toggle simply won't
-// change state.
+// The IPC dispatch itself is a synchronous kernel round-trip — it returns as
+// soon as the handler replies (typically setting gRunning=false and returning).
+// The polling window covers the small gap between the handler replying and the
+// process fully unloading from the kernel's process table. 200 ms is a very
+// conservative ceiling; a well-behaved module exits within the first poll.
 //
-// We never block indefinitely. The polling interval is fixed at 50 ms so a
-// 1 s timeout costs at most ~20 cheap IPC calls to pmdmnt. The cost is paid
-// only once per kill action, only on modules that opted in.
+// smGetServiceOriginal is used instead of smGetService to avoid blocking when
+// the service name is not registered — critical for the fork-swap case where
+// two modules share the same program ID but register different service names
+// (e.g. "sys:clk" vs "hoc:clk"). smGetService would wait indefinitely for a
+// name that will never appear; smGetServiceOriginal returns an error immediately.
 // ----------------------------------------------------------------------------
 static bool tryGracefulShutdown(const SystemModule& module) {
     if (!module.hasGracefulShutdown)
         return false;
 
-    Service srv;
-    Result rc = smGetService(&srv, module.gracefulShutdownService);
+    // smGetServiceOriginal takes a raw Handle*, not a Service*. Wrap it after.
+    Handle handle = INVALID_HANDLE;
+    Result rc = smGetServiceOriginal(&handle, smEncodeName(module.gracefulShutdownService));
     if (R_FAILED(rc))
-        return false; // Service not registered (sysmodule may not be ready).
+        return false; // Service not registered — fork mismatch or module not ready.
+    Service srv = {};
+    serviceCreate(&srv, handle);
 
-    // Send the declared command with no input and no output. Any non-default
-    // arg shape would risk schema mismatch across versions, so the contract
-    // is intentionally limited to a void -> void RPC.
     rc = serviceDispatch(&srv, module.gracefulShutdownCmd);
     serviceClose(&srv);
     if (R_FAILED(rc))
         return false; // Module rejected the command or dispatcher error.
 
-    // Poll pmdmnt for process exit. The cooperative module's IPC handler is
-    // expected to have already restored its kernel state by the time it
-    // replied — what we're waiting on here is the main loop noticing
-    // gRunning=false (or equivalent) and the process actually unloading.
-    constexpr u64 pollIntervalNs = 50'000'000ULL; // 50 ms
-    const u64 timeoutNs = static_cast<u64>(module.gracefulShutdownTimeoutMs) * 1'000'000ULL;
+    // Poll for process exit. The handler has already replied; we are waiting
+    // for the module's main loop to observe gRunning=false and fully unload.
+    // 200 ms hard ceiling — 4 polls of 50 ms. Any well-behaved module exits
+    // within the first interval; a misbehaving one causes a bounded UI pause.
+    constexpr u64 pollIntervalNs = 50'000'000ULL;  // 50 ms
+    constexpr u64 timeoutNs      = 200'000'000ULL; // 200 ms hard ceiling
     u64 elapsedNs = 0;
     while (elapsedNs < timeoutNs) {
         u64 pid = 0;
-        Result pmrc = pmdmntGetProcessId(&pid, module.programId);
-        if (R_FAILED(pmrc) || pid == 0)
+        if (R_FAILED(pmdmntGetProcessId(&pid, module.programId)) || pid == 0)
             return true; // Process is gone — graceful exit confirmed.
         svcSleepThread(pollIntervalNs);
         elapsedNs += pollIntervalNs;
     }
-    return false; // Timed out.
+    return false; // Process still alive after 200 ms — treat as failure.
 }
 
 GuiMain::GuiMain() {
@@ -178,7 +180,7 @@ GuiMain::GuiMain() {
         // restore that state cleanly. The contract is fully opt-in.
         //
         // shutdown_service and shutdown_cmd are both required.
-        // shutdown_timeout_ms is optional — defaults to 1000 ms when absent.
+        // shutdown_timeout_ms is ignored if present — polling window is hardcoded.
         //
         // For dynamic modules (requires_reboot: false):
         //   Graceful shutdown is attempted first; pmshellTerminateProgram is
@@ -198,14 +200,13 @@ GuiMain::GuiMain() {
         bool gracefulOk = false;
         char gracefulSvc[16] = {};
         u32  gracefulCmd = 0;
-        u32  gracefulTimeoutMs = 1000;
         {
             cJSON* svcItem = cJSON_GetObjectItem(toolboxFileContent, "shutdown_service");
             cJSON* cmdItem = cJSON_GetObjectItem(toolboxFileContent, "shutdown_cmd");
-            cJSON* toItem  = cJSON_GetObjectItem(toolboxFileContent, "shutdown_timeout_ms");
 
-            // Only shutdown_service and shutdown_cmd are required.
-            // shutdown_timeout_ms defaults to 1000 ms if absent or invalid.
+            // shutdown_service and shutdown_cmd are both required.
+            // shutdown_timeout_ms is no longer read — the polling window is
+            // hardcoded to 200 ms in tryGracefulShutdown (see above).
             if (svcItem && cJSON_IsString(svcItem)
                 && cmdItem && cJSON_IsNumber(cmdItem)) {
                 const char* svcStr = svcItem->valuestring;
@@ -214,12 +215,8 @@ GuiMain::GuiMain() {
                 if (svcLen > 0 && svcLen <= 8 && cmdItem->valueint >= 0) {
                     std::memcpy(gracefulSvc, svcStr, svcLen);
                     gracefulSvc[svcLen] = '\0';
-                    gracefulCmd       = static_cast<u32>(cmdItem->valueint);
-                    // Timeout: use declared value if present and positive, else 1000 ms.
-                    gracefulTimeoutMs = (toItem && cJSON_IsNumber(toItem) && toItem->valueint > 0)
-                                        ? static_cast<u32>(toItem->valueint)
-                                        : 1000;
-                    gracefulOk = true;
+                    gracefulCmd = static_cast<u32>(cmdItem->valueint);
+                    gracefulOk  = true;
                 }
             }
         }
@@ -236,7 +233,6 @@ GuiMain::GuiMain() {
             .titleIdStr = titleIdBuffer,
             .hasGracefulShutdown = gracefulOk,
             .gracefulShutdownCmd = gracefulCmd,
-            .gracefulShutdownTimeoutMs = gracefulTimeoutMs,
         };
         // gracefulShutdownService is a fixed array — copy after aggregate init
         std::memcpy(module.gracefulShutdownService, gracefulSvc, sizeof(module.gracefulShutdownService));
@@ -290,14 +286,22 @@ GuiMain::GuiMain() {
                     // Static module WITH graceful-shutdown contract.
                     // Can be started and stopped via the overlay.
                     // On stop: graceful shutdown only — NEVER force-kill.
-                    //   If the call fails or times out, the toggle does nothing
-                    //   and state is unchanged.
+                    //   If the IPC doesn't exist, the command is rejected, or the
+                    //   process doesn't exit within the timeout, tryGracefulShutdown
+                    //   returns false and a notification is posted so the user knows
+                    //   the toggle did not take effect. State is unchanged.
                     // On start: launch normally via pmshell.
                     // -----------------------------------------------------------
                     if (this->isRunning(module)) {
-                        tryGracefulShutdown(module);
-                        // Whether it succeeded or failed, the key was handled.
-                        // GuiMain::update() will reflect actual state next tick.
+                        const bool exited = tryGracefulShutdown(module);
+                        if (!exited) {
+                            // IPC unavailable, rejected, or timed out — state is
+                            // unchanged. Fire a notification so the user knows.
+                            if (tsl::notification)
+                                tsl::notification->showNow(ult::NOTIFY_HEADER + "Shutdown IPC has failed.", 22);
+                        }
+                        // If exited == true, update() will flip the label to "Off"
+                        // on the next tick — no manual setValue needed.
                     } else {
                         const NcmProgramLocation programLocation{
                             .program_id = module.programId,
