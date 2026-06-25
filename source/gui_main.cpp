@@ -226,7 +226,7 @@ GuiMain::GuiMain() {
         std::snprintf(titleIdBuffer, sizeof(titleIdBuffer), "%016lX", sysmoduleProgramId);
 
         module = {
-            .listItem = new tsl::elm::ListItem(listItemText),
+            .listItem = new AutoStartToggleListItem(listItemText, descriptions[0][0]),
             .programId = sysmoduleProgramId,
             .needReboot = static_cast<bool>(cJSON_IsTrue(rebootItem)),
             .displayName = listItemText,
@@ -255,29 +255,50 @@ GuiMain::GuiMain() {
             }
 
             if (click & KEY_A) {
+                if (module.needReboot && !module.hasGracefulShutdown) {
+                    // Cannot toggle at runtime — shake the highlight exactly as
+                    // a locked trackbar does (FocusDirection::Right), so the user
+                    // gets the same visual "no" they'd see anywhere else in Tesla.
+                    // triggerWallFeedback (sound + haptics) is already fired by
+                    // ListItem::onClick when isLocked is true, so we only need the
+                    // visual shake here.
+                    module.listItem->shakeHighlight(tsl::FocusDirection::Right, true);
+                    return true;
+                }
                 if (!module.needReboot) {
                     // -----------------------------------------------------------
                     // Dynamic module — full toggle with graceful-first, force-kill
                     // fallback.
                     // -----------------------------------------------------------
                     if (this->isRunning(module)) {
-                        bool exited = tryGracefulShutdown(module);
+                        // Run on a background thread so the click animation plays
+                        // freely — tryGracefulShutdown polls for up to 200ms, which
+                        // would freeze the render thread and swallow the animation
+                        // entirely if called synchronously here.
+                        this->spawnIpcThread([this, module]() {
+                            bool exited = tryGracefulShutdown(module);
 
-                        // Force-kill fallback for dynamic modules only.
-                        // isRunning() re-check avoids a redundant terminate call
-                        // in the race where the process exited between the timeout
-                        // expiry and here.
-                        if (!exited && this->isRunning(module)) {
-                            pmshellTerminateProgram(module.programId);
-                        }
+                            // Force-kill fallback for dynamic modules only.
+                            // isRunning() re-check avoids a redundant terminate call
+                            // in the race where the process exited between the timeout
+                            // expiry and here.
+                            if (!exited && this->isRunning(module)) {
+                                pmshellTerminateProgram(module.programId);
+                            }
+                        });
                     } else {
-                        /* Start process. */
-                        const NcmProgramLocation programLocation{
-                            .program_id = module.programId,
-                            .storageID = NcmStorageId_None,
-                        };
-                        u64 pid = 0;
-                        pmshellLaunchProgram(0, &programLocation, &pid);
+                        // Run on a background thread — pmshellLaunchProgram blocks
+                        // until the process is actually created, which was eating the
+                        // whole click-animation window before a single frame rendered.
+                        this->spawnIpcThread([module]() {
+                            /* Start process. */
+                            const NcmProgramLocation programLocation{
+                                .program_id = module.programId,
+                                .storageID = NcmStorageId_None,
+                            };
+                            u64 pid = 0;
+                            pmshellLaunchProgram(0, &programLocation, &pid);
+                        });
                     }
                     return true;
 
@@ -293,22 +314,28 @@ GuiMain::GuiMain() {
                     // On start: launch normally via pmshell.
                     // -----------------------------------------------------------
                     if (this->isRunning(module)) {
-                        const bool exited = tryGracefulShutdown(module);
-                        if (!exited) {
-                            // IPC unavailable, rejected, or timed out — state is
-                            // unchanged. Fire a notification so the user knows.
-                            if (tsl::notification)
-                                tsl::notification->showNow(ult::NOTIFY_HEADER + "Shutdown IPC has failed.", 22);
-                        }
-                        // If exited == true, update() will flip the label to "Off"
-                        // on the next tick — no manual setValue needed.
+                        // Background thread — same reasoning as the dynamic path above.
+                        this->spawnIpcThread([this, module]() {
+                            const bool exited = tryGracefulShutdown(module);
+                            if (!exited) {
+                                // IPC unavailable, rejected, or timed out — state is
+                                // unchanged. Fire a notification so the user knows.
+                                if (tsl::notification)
+                                    tsl::notification->showNow(ult::NOTIFY_HEADER + "Shutdown IPC has failed.", 22);
+                            }
+                            // If exited == true, update() will flip the label to "Off"
+                            // on the next tick — no manual setValue needed.
+                        });
                     } else {
-                        const NcmProgramLocation programLocation{
-                            .program_id = module.programId,
-                            .storageID = NcmStorageId_None,
-                        };
-                        u64 pid = 0;
-                        pmshellLaunchProgram(0, &programLocation, &pid);
+                        // Background thread — same reasoning as the dynamic path above.
+                        this->spawnIpcThread([module]() {
+                            const NcmProgramLocation programLocation{
+                                .program_id = module.programId,
+                                .storageID = NcmStorageId_None,
+                            };
+                            u64 pid = 0;
+                            pmshellLaunchProgram(0, &programLocation, &pid);
+                        });
                     }
                     return true;
                 }
@@ -352,6 +379,11 @@ GuiMain::GuiMain() {
 GuiMain::~GuiMain() {
     // Signal that we're shutting down to skip any pending updates
     m_isActive = false;
+
+    // Join any in-flight IPC thread so we don't destroy the std::thread
+    // object while it's still running (that would call std::terminate).
+    if (m_ipcThread.joinable())
+        m_ipcThread.join();
     
     // Fast cleanup - vector destructor handles the rest
     //m_sysmoduleListItems.clear();
@@ -429,10 +461,25 @@ inline void drawMemoryWidget(auto renderer) {
         }
     }
     if (!ult::hideWidgetBorder) {
+        // Mirror drawWidget()'s animated colour-wheel border: identical anchor
+        // colours, 10s rotation and reverseFlow=false, gated by the same
+        // ult::dynamicWidgetBorder toggle. When that's off, &w2 -> nullptr and
+        // the border is the plain widgetBorderColor exactly as before.
+        const tsl::Switch2Wheel w2 = tsl::makeSwitch2Wheel(
+            tsl::s2WidgetBorderColor1,      // anchor[0] UR -- fixed peak
+            tsl::s2WidgetBorderColor2,      // anchor[2] LL -- fixed peak
+            tsl::s2WidgetBorderColor3,      // anchor[1] LR -- hero bright
+            tsl::s2WidgetBorderColor3Deep,  // anchor[1] LR -- hero deep
+            tsl::s2WidgetBorderColor4,      // anchor[3] UL -- hero bright
+            tsl::s2WidgetBorderColor4Deep,  // anchor[3] UL -- hero deep
+            10.0,
+            false
+        );
         renderer->drawUniformRoundedRectBorder(
             245, 15,
             (ult::extendedWidgetBackdrop ? tsl::cfg::FramebufferWidth - 255 : tsl::cfg::FramebufferWidth - 215),
-            66, 3, renderer->a(tsl::widgetBorderColor)
+            66, 3, renderer->a(tsl::widgetBorderColor),
+            ult::dynamicWidgetBorder ? &w2 : nullptr
         );
     }
 
@@ -523,7 +570,12 @@ void GuiMain::update() {
     // Early exit if shutting down - avoids unnecessary work during cleanup
     if (!m_isActive)
         return;
-        
+
+    // Reap a finished IPC thread. m_ipcDone is set by the thread itself just
+    // before it returns, so this join is always instantaneous — we never wait.
+    if (m_ipcDone.load(std::memory_order_acquire) && m_ipcThread.joinable())
+        m_ipcThread.join();
+
     static u32 counter = 0;
 
     // Check every 30 frames (~0.5 seconds at 60fps)
@@ -533,6 +585,41 @@ void GuiMain::update() {
     for (const auto& module : this->m_sysmoduleListItems) {
         this->updateStatus(module);
     }
+}
+
+// ----------------------------------------------------------------------------
+// spawnIpcThread
+//
+// Runs `action` on a dedicated std::thread so the render thread never blocks
+// mid-animation. The click animation is stamped at KEY_A press time inside
+// ListItem::onClick and plays on the render thread — if the IPC call that
+// follows (pmshellLaunchProgram, pmshellTerminateProgram, or the 200ms
+// tryGracefulShutdown polling loop) ran on the same thread it would freeze
+// every frame until it returned, cutting the animation short or killing it
+// entirely before a single frame could render it.
+//
+// Serialisation: if a previous thread is still alive when a new click fires,
+// we join it first. In practice the old thread is already finished or within
+// milliseconds of finishing (the user's reaction time is >100ms; the IPC
+// calls complete well before that), so the join is effectively free.
+//
+// Lifetime: the thread sets m_ipcDone = true just before returning.
+// update() sees that flag and calls join() on the next tick — a guaranteed
+// instant join since the thread has already exited. This keeps std::thread
+// in a valid, joinable-until-reaped state and avoids detach() (which would
+// let a dying thread touch freed GuiMain memory after the overlay closes).
+// ----------------------------------------------------------------------------
+void GuiMain::spawnIpcThread(std::function<void()> action) {
+    // Serialise: join any previous thread that is still technically live.
+    // This is the "overlapping click" guard — extremely rare, essentially free.
+    if (m_ipcThread.joinable())
+        m_ipcThread.join();
+
+    m_ipcDone.store(false, std::memory_order_release);
+    m_ipcThread = std::thread([this, action = std::move(action)]() {
+        action();
+        m_ipcDone.store(true, std::memory_order_release);
+    });
 }
 
 bool GuiMain::handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState leftJoyStick, HidAnalogStickState rightJoyStick) {
@@ -578,6 +665,13 @@ void GuiMain::updateStatus(const SystemModule &module) {
 
     const char* desc = descriptions[running][hasFlag];
     module.listItem->setValue(desc, !running);
+
+    // Switch 2 style: the sliding pill mirrors the running state and the circle
+    // colour mirrors the auto-start (boot2) flag. Both are no-ops in legacy
+    // style (drawValue ignores them there). setRunning only animates on a real
+    // change; the first call here snaps to the true state with no slide.
+    module.listItem->setRunning(running);
+    module.listItem->setAutoStart(hasFlag);
 }
 
 bool GuiMain::hasFlag(const SystemModule &module) {
