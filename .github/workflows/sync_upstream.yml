@@ -129,10 +129,13 @@ jobs:
           _Opened by \`sync_upstream.yml\`. Close without merging if upstream changes shouldn't be adopted._
           EOF
           )
-          EXISTING=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' || echo "")
-          if [ -n "$EXISTING" ]; then
-            gh pr edit "$EXISTING" --title "$TITLE" --body "$BODY"
+          # REST вместо gh pr (GraphQL createPullRequest падает с "Resource not accessible by integration",
+          # хотя в настройках репо PR-создание включено). REST /pulls уважает эту настройку.
+          EXISTING=$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=Dimasick-git:$BRANCH&state=open&base=main" --jq 'if length>0 then (.[0].number|tostring) else "" end' || echo "")
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$EXISTING" -f title="$TITLE" -f body="$BODY" >/dev/null
             echo "Updated existing PR #$EXISTING"
           else
-            gh pr create --base main --head "$BRANCH" --title "$TITLE" --body "$BODY"
+            gh api -X POST "repos/$GITHUB_REPOSITORY/pulls" -f title="$TITLE" -f head="$BRANCH" -f base=main -f body="$BODY" >/dev/null
+            echo "Created PR for $BRANCH"
           fi
