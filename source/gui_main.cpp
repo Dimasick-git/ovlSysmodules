@@ -576,6 +576,27 @@ void GuiMain::update() {
     if (m_ipcDone.load(std::memory_order_acquire) && m_ipcThread.joinable())
         m_ipcThread.join();
 
+    // Grey out the A+OK footer hint when the focused item is a static module
+    // (needReboot=true, no graceful shutdown) — pressing A on these does nothing
+    // actionable, so the focused color would be misleading. tsl's own loop will
+    // snap it back to true the instant focus moves to any other element, so
+    // there is no risk of it staying grey if the user navigates away.
+    {
+        tsl::elm::Element* focused = this->getFocusedElement();
+        bool onStatic = false;
+        if (focused) {
+            for (const auto& module : m_sysmoduleListItems) {
+                if (module.needReboot && !module.hasGracefulShutdown &&
+                    module.listItem == focused) {
+                    onStatic = true;
+                    break;
+                }
+            }
+        }
+        if (onStatic)
+            selectIsUsingFocusedColor = false;
+    }
+
     static u32 counter = 0;
 
     // Check every 30 frames (~0.5 seconds at 60fps)
