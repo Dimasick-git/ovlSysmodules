@@ -73,6 +73,11 @@ jobs:
                 esac
               done
             done < .github/sync-protected-paths.txt
+            # Upstream возвращает сабмодуль libs/libultrahand, который форк намеренно
+            # удалил (заменён на libs/libryazhahand). Держим удалённым, иначе конфликт
+            # modify/delete ломает git commit.
+            git rm -r --cached --ignore-unmatch -- libs/libultrahand >/dev/null 2>&1 || true
+            rm -rf -- libs/libultrahand 2>/dev/null || true
             if git ls-files --unmerged | grep -q .; then
               echo "Non-protected conflicts remain — committing for manual review in PR."
               git commit --no-edit -a || true
