@@ -39,7 +39,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 APP_TITLE	:=	Sysmodules
 APP_AUTHOR	:=	Dimasick-git (fork of ppkantorski/ovl-sysmodules)
-APP_VERSION	:=	1.5.1
+APP_VERSION	:=	1.5.2
 
 TARGET		:=	ovlSysmodules
 BUILD		:=	build
