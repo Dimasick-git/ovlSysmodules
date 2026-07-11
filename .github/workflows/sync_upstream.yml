@@ -11,16 +11,16 @@ on:
 
 jobs:
   sync:
-    name: Pull ppkantorski/ovl-sysmodules into a sync branch
+    name: Merge upstream directly into main
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
 
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -37,30 +37,18 @@ jobs:
       - name: Check whether sync is needed
         id: check
         run: |
-          set -e
           BEHIND=$(git rev-list --count main..upstream/master)
           echo "Commits behind upstream: $BEHIND"
           echo "behind=$BEHIND" >> $GITHUB_OUTPUT
 
-      - name: Create sync branch
+      - name: Merge upstream into main
         if: steps.check.outputs.behind != '0'
-        id: branch
         run: |
           set -e
-          DATE=$(date -u +%Y-%m-%d)
-          BRANCH="sync/upstream-$DATE"
-          git checkout -B "$BRANCH" main
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-
-      - name: Merge upstream (favour ours for protected paths)
-        if: steps.check.outputs.behind != '0'
-        id: merge
-        run: |
-          set -e
-          if git merge --no-ff --no-edit upstream/master; then
-            echo "clean=true" >> $GITHUB_OUTPUT
+          if git merge --no-edit upstream/master; then
+            echo "Clean merge into main"
           else
-            echo "Conflicts; auto-resolving protected paths to 'ours'..."
+            echo "Conflicts: auto-resolving protected paths to 'ours'..."
             while IFS= read -r path; do
               [[ -z "$path" || "$path" == \#* ]] && continue
               for f in $(git ls-files --unmerged | awk '{print $4}' | sort -u); do
@@ -73,69 +61,16 @@ jobs:
                 esac
               done
             done < .github/sync-protected-paths.txt
-            # Upstream возвращает сабмодуль libs/libultrahand, который форк намеренно
-            # удалил (заменён на libs/libryazhahand). Держим удалённым, иначе конфликт
-            # modify/delete ломает git commit.
             git rm -r --cached --ignore-unmatch -- libs/libultrahand >/dev/null 2>&1 || true
             rm -rf -- libs/libultrahand 2>/dev/null || true
             if git ls-files --unmerged | grep -q .; then
-              echo "Non-protected conflicts remain — committing for manual review in PR."
-              git commit --no-edit -a || true
-              echo "clean=false" >> $GITHUB_OUTPUT
-            else
-              git commit --no-edit
-              echo "clean=true" >> $GITHUB_OUTPUT
+              echo "::error::Non-protected conflicts remain. Manual fix required."
+              exit 1
             fi
+            git commit --no-edit
           fi
 
-      - name: Push sync branch
+      - name: Push to main
         if: steps.check.outputs.behind != '0'
-        run: git push --force-with-lease origin "${{ steps.branch.outputs.branch }}"
-
-      - name: Open pull request
-        if: steps.check.outputs.behind != '0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          BRANCH="${{ steps.branch.outputs.branch }}"
-          BEHIND="${{ steps.check.outputs.behind }}"
-          CLEAN="${{ steps.merge.outputs.clean }}"
-          TITLE="Sync upstream ($BEHIND new commits) — $(date -u +%Y-%m-%d)"
-          UPSTREAM_LOG=$(git log --oneline main..upstream/master | head -50)
-          if [ "$CLEAN" = "true" ]; then
-            STATUS="Auto-merge clean ✅ — ready to merge after CI passes."
-          else
-            STATUS="⚠️ Merge had conflicts. Protected paths auto-resolved to 'ours'; non-protected conflicts left inline for manual fix."
-          fi
-          BODY=$(cat <<EOF
-          Automated daily sync from \`ppkantorski/ovl-sysmodules:master\`.
-
-          **Commits behind**: $BEHIND
-          **Status**: $STATUS
-
-          ## Upstream commits in this sync
-
-          \`\`\`
-          $UPSTREAM_LOG
-          \`\`\`
-
-          ## Protected files
-
-          Ryazhenka-specific patches (i18n source/cpp, lang/, README/CHANGELOG/docs, CI workflows, submodule URL, branded Makefile) are listed in [\`.github/sync-protected-paths.txt\`](.github/sync-protected-paths.txt) and preserved automatically.
-
-          ---
-
-          _Opened by \`sync_upstream.yml\`. Close without merging if upstream changes shouldn't be adopted._
-          EOF
-          )
-          # REST вместо gh pr (GraphQL createPullRequest падает с "Resource not accessible by integration",
-          # хотя в настройках репо PR-создание включено). REST /pulls уважает эту настройку.
-          EXISTING=$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=Dimasick-git:$BRANCH&state=open&base=main" --jq 'if length>0 then (.[0].number|tostring) else "" end' || echo "")
-          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$EXISTING" -f title="$TITLE" -f body="$BODY" >/dev/null
-            echo "Updated existing PR #$EXISTING"
-          else
-            gh api -X POST "repos/$GITHUB_REPOSITORY/pulls" -f title="$TITLE" -f head="$BRANCH" -f base=main -f body="$BODY" >/dev/null
-            echo "Created PR for $BRANCH"
-          fi
+        run: git push origin main
+        
