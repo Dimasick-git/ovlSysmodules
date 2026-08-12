@@ -230,7 +230,7 @@ GuiMain::GuiMain() {
 
         // Use explicit assignments for compatibility with the devkitA64
         // compiler configuration used by the release workflow.
-        module.listItem = new tsl::elm::ListItem(listItemText);
+        module.listItem = new AutoStartToggleListItem(listItemText, "");
         module.programId = sysmoduleProgramId;
         module.needReboot = static_cast<bool>(cJSON_IsTrue(rebootItem));
         module.displayName = listItemText;
