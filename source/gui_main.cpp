@@ -228,17 +228,17 @@ GuiMain::GuiMain() {
         char titleIdBuffer[32];
         std::snprintf(titleIdBuffer, sizeof(titleIdBuffer), "%016lX", sysmoduleProgramId);
 
-        module = {
-            .listItem = new tsl::elm::ListItem(listItemText),
-            .programId = sysmoduleProgramId,
-            .needReboot = static_cast<bool>(cJSON_IsTrue(rebootItem)),
-            .displayName = listItemText,
-            .titleIdStr = titleIdBuffer,
-            .hasGracefulShutdown = gracefulOk,
-            .gracefulShutdownCmd = gracefulCmd,
-            .gracefulShutdownTimeoutMs = gracefulTimeoutMs,
-        };
-        // gracefulShutdownService is a fixed array — copy after aggregate init
+        // Use explicit assignments for compatibility with the devkitA64
+        // compiler configuration used by the release workflow.
+        module.listItem = new tsl::elm::ListItem(listItemText);
+        module.programId = sysmoduleProgramId;
+        module.needReboot = static_cast<bool>(cJSON_IsTrue(rebootItem));
+        module.displayName = listItemText;
+        module.titleIdStr = titleIdBuffer;
+        module.hasGracefulShutdown = gracefulOk;
+        module.gracefulShutdownCmd = gracefulCmd;
+        module.gracefulShutdownTimeoutMs = gracefulTimeoutMs;
+        // gracefulShutdownService is a fixed array and must be copied explicitly.
         std::memcpy(module.gracefulShutdownService, gracefulSvc, sizeof(module.gracefulShutdownService));
 
         cJSON_Delete(toolboxFileContent);
