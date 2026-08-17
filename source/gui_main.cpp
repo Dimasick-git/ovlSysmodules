@@ -223,7 +223,7 @@ GuiMain::GuiMain() {
         std::snprintf(titleIdBuffer, sizeof(titleIdBuffer), "%016lX", sysmoduleProgramId);
 
         module = {
-            .listItem = new AutoStartToggleListItem(listItemText, descriptions[0][0]),
+            .listItem = new AutoStartToggleListItem(listItemText, statusDescription(false, false)),
             .programId = sysmoduleProgramId,
             .needReboot = static_cast<bool>(cJSON_IsTrue(rebootItem)),
             .displayName = listItemText,
