@@ -7,15 +7,11 @@ constexpr const char* const boot2FlagFolder = "/atmosphere/contents/%016lX/flags
 
 static char pathBuffer[FS_MAX_PATH];
 
-// Ryazhenka: replaced upstream's [running][hasFlag] descriptions
-// table with statusDescription() that builds the displayed string
-// from a stable Switch-glyph prefix (off/on flag indicator) plus a
-// localised "On"/"Off" suffix (rebound by ovls::loadLanguage()).
 static const char *statusDescription(bool running, bool hasFlag) {
-    static thread_local std::string buf;
-    buf.assign(hasFlag ? ovls::ICON_FLAG : ovls::ICON_NO_FLAG);
-    buf += (running ? ovls::ON_LABEL : ovls::OFF_LABEL);
-    return buf.c_str();
+    static thread_local std::string text;
+    text.assign(hasFlag ? ovls::ICON_FLAG : ovls::ICON_NO_FLAG);
+    text += running ? ovls::ON_LABEL : ovls::OFF_LABEL;
+    return text.c_str();
 }
 
 // Pre-allocate buffer for file reading to avoid repeated allocations
@@ -24,53 +20,55 @@ static char fileBuffer[4096];
 // ----------------------------------------------------------------------------
 // tryGracefulShutdown
 //
-// Attempts cooperative shutdown via the IPC contract declared in the module's
-// toolbox.json. Returns true only if the process actually exited within the
-// declared timeout. Returns false in every other case — service unreachable,
-// IPC dispatch failed, or the process was still alive when the deadline hit.
+// Sends the declared void->void IPC command to the module, then polls pmdmnt
+// waiting for the process to unload. Returns true only if the process actually
+// exited. Returns false if the service is not registered, the dispatch fails,
+// or the process is still alive after the polling window.
 //
-// For dynamic modules the caller should follow up with pmshellTerminateProgram
-// on a false return. For static modules with graceful shutdown declared, the
-// caller must NOT force-kill on a false return — the toggle simply won't
-// change state.
+// The IPC dispatch itself is a synchronous kernel round-trip — it returns as
+// soon as the handler replies (typically setting gRunning=false and returning).
+// The polling window covers the small gap between the handler replying and the
+// process fully unloading from the kernel's process table. 200 ms is a very
+// conservative ceiling; a well-behaved module exits within the first poll.
 //
-// We never block indefinitely. The polling interval is fixed at 50 ms so a
-// 1 s timeout costs at most ~20 cheap IPC calls to pmdmnt. The cost is paid
-// only once per kill action, only on modules that opted in.
+// smGetServiceOriginal is used instead of smGetService to avoid blocking when
+// the service name is not registered — critical for the fork-swap case where
+// two modules share the same program ID but register different service names
+// (e.g. "sys:clk" vs "hoc:clk"). smGetService would wait indefinitely for a
+// name that will never appear; smGetServiceOriginal returns an error immediately.
 // ----------------------------------------------------------------------------
 static bool tryGracefulShutdown(const SystemModule& module) {
     if (!module.hasGracefulShutdown)
         return false;
 
-    Service srv;
-    Result rc = smGetService(&srv, module.gracefulShutdownService);
+    // smGetServiceOriginal takes a raw Handle*, not a Service*. Wrap it after.
+    Handle handle = INVALID_HANDLE;
+    Result rc = smGetServiceOriginal(&handle, smEncodeName(module.gracefulShutdownService));
     if (R_FAILED(rc))
-        return false; // Service not registered (sysmodule may not be ready).
+        return false; // Service not registered — fork mismatch or module not ready.
+    Service srv = {};
+    serviceCreate(&srv, handle);
 
-    // Send the declared command with no input and no output. Any non-default
-    // arg shape would risk schema mismatch across versions, so the contract
-    // is intentionally limited to a void -> void RPC.
     rc = serviceDispatch(&srv, module.gracefulShutdownCmd);
     serviceClose(&srv);
     if (R_FAILED(rc))
         return false; // Module rejected the command or dispatcher error.
 
-    // Poll pmdmnt for process exit. The cooperative module's IPC handler is
-    // expected to have already restored its kernel state by the time it
-    // replied — what we're waiting on here is the main loop noticing
-    // gRunning=false (or equivalent) and the process actually unloading.
-    constexpr u64 pollIntervalNs = 50'000'000ULL; // 50 ms
-    const u64 timeoutNs = static_cast<u64>(module.gracefulShutdownTimeoutMs) * 1'000'000ULL;
+    // Poll for process exit. The handler has already replied; we are waiting
+    // for the module's main loop to observe gRunning=false and fully unload.
+    // 200 ms hard ceiling — 4 polls of 50 ms. Any well-behaved module exits
+    // within the first interval; a misbehaving one causes a bounded UI pause.
+    constexpr u64 pollIntervalNs = 50'000'000ULL;  // 50 ms
+    constexpr u64 timeoutNs      = 200'000'000ULL; // 200 ms hard ceiling
     u64 elapsedNs = 0;
     while (elapsedNs < timeoutNs) {
         u64 pid = 0;
-        Result pmrc = pmdmntGetProcessId(&pid, module.programId);
-        if (R_FAILED(pmrc) || pid == 0)
+        if (R_FAILED(pmdmntGetProcessId(&pid, module.programId)) || pid == 0)
             return true; // Process is gone — graceful exit confirmed.
         svcSleepThread(pollIntervalNs);
         elapsedNs += pollIntervalNs;
     }
-    return false; // Timed out.
+    return false; // Process still alive after 200 ms — treat as failure.
 }
 
 GuiMain::GuiMain() {
@@ -96,7 +94,8 @@ GuiMain::GuiMain() {
         if (entry->d_type != DT_DIR)
             continue;
 
-        if (strncmp(entry->d_name, "0100", 4) == 0 && strncmp(entry->d_name + 4, "00000000", 8) != 0)
+        // Fast path filtering using pointer comparison
+        if (*(uint32_t*)entry->d_name == *(uint32_t*)&"0100" && *(uint64_t*)(&entry->d_name[4]) != *(uint64_t*)&"00000000")
             continue;
 
         // Build toolbox.json path
@@ -178,7 +177,7 @@ GuiMain::GuiMain() {
         // restore that state cleanly. The contract is fully opt-in.
         //
         // shutdown_service and shutdown_cmd are both required.
-        // shutdown_timeout_ms is optional — defaults to 1000 ms when absent.
+        // shutdown_timeout_ms is ignored if present — polling window is hardcoded.
         //
         // For dynamic modules (requires_reboot: false):
         //   Graceful shutdown is attempted first; pmshellTerminateProgram is
@@ -198,14 +197,13 @@ GuiMain::GuiMain() {
         bool gracefulOk = false;
         char gracefulSvc[16] = {};
         u32  gracefulCmd = 0;
-        u32  gracefulTimeoutMs = 1000;
         {
             cJSON* svcItem = cJSON_GetObjectItem(toolboxFileContent, "shutdown_service");
             cJSON* cmdItem = cJSON_GetObjectItem(toolboxFileContent, "shutdown_cmd");
-            cJSON* toItem  = cJSON_GetObjectItem(toolboxFileContent, "shutdown_timeout_ms");
 
-            // Only shutdown_service and shutdown_cmd are required.
-            // shutdown_timeout_ms defaults to 1000 ms if absent or invalid.
+            // shutdown_service and shutdown_cmd are both required.
+            // shutdown_timeout_ms is no longer read — the polling window is
+            // hardcoded to 200 ms in tryGracefulShutdown (see above).
             if (svcItem && cJSON_IsString(svcItem)
                 && cmdItem && cJSON_IsNumber(cmdItem)) {
                 const char* svcStr = svcItem->valuestring;
@@ -214,12 +212,8 @@ GuiMain::GuiMain() {
                 if (svcLen > 0 && svcLen <= 8 && cmdItem->valueint >= 0) {
                     std::memcpy(gracefulSvc, svcStr, svcLen);
                     gracefulSvc[svcLen] = '\0';
-                    gracefulCmd       = static_cast<u32>(cmdItem->valueint);
-                    // Timeout: use declared value if present and positive, else 1000 ms.
-                    gracefulTimeoutMs = (toItem && cJSON_IsNumber(toItem) && toItem->valueint > 0)
-                                        ? static_cast<u32>(toItem->valueint)
-                                        : 1000;
-                    gracefulOk = true;
+                    gracefulCmd = static_cast<u32>(cmdItem->valueint);
+                    gracefulOk  = true;
                 }
             }
         }
@@ -228,17 +222,16 @@ GuiMain::GuiMain() {
         char titleIdBuffer[32];
         std::snprintf(titleIdBuffer, sizeof(titleIdBuffer), "%016lX", sysmoduleProgramId);
 
-        // Use explicit assignments for compatibility with the devkitA64
-        // compiler configuration used by the release workflow.
-        module.listItem = new AutoStartToggleListItem(listItemText, "");
-        module.programId = sysmoduleProgramId;
-        module.needReboot = static_cast<bool>(cJSON_IsTrue(rebootItem));
-        module.displayName = listItemText;
-        module.titleIdStr = titleIdBuffer;
-        module.hasGracefulShutdown = gracefulOk;
-        module.gracefulShutdownCmd = gracefulCmd;
-        module.gracefulShutdownTimeoutMs = gracefulTimeoutMs;
-        // gracefulShutdownService is a fixed array and must be copied explicitly.
+        module = {
+            .listItem = new AutoStartToggleListItem(listItemText, descriptions[0][0]),
+            .programId = sysmoduleProgramId,
+            .needReboot = static_cast<bool>(cJSON_IsTrue(rebootItem)),
+            .displayName = listItemText,
+            .titleIdStr = titleIdBuffer,
+            .hasGracefulShutdown = gracefulOk,
+            .gracefulShutdownCmd = gracefulCmd,
+        };
+        // gracefulShutdownService is a fixed array — copy after aggregate init
         std::memcpy(module.gracefulShutdownService, gracefulSvc, sizeof(module.gracefulShutdownService));
 
         cJSON_Delete(toolboxFileContent);
@@ -259,29 +252,50 @@ GuiMain::GuiMain() {
             }
 
             if (click & KEY_A) {
+                if (module.needReboot && !module.hasGracefulShutdown) {
+                    // Cannot toggle at runtime — shake the highlight exactly as
+                    // a locked trackbar does (FocusDirection::Right), so the user
+                    // gets the same visual "no" they'd see anywhere else in Tesla.
+                    // triggerWallFeedback (sound + haptics) is already fired by
+                    // ListItem::onClick when isLocked is true, so we only need the
+                    // visual shake here.
+                    module.listItem->shakeHighlight(tsl::FocusDirection::Right, true);
+                    return true;
+                }
                 if (!module.needReboot) {
                     // -----------------------------------------------------------
                     // Dynamic module — full toggle with graceful-first, force-kill
                     // fallback.
                     // -----------------------------------------------------------
                     if (this->isRunning(module)) {
-                        bool exited = tryGracefulShutdown(module);
+                        // Run on a background thread so the click animation plays
+                        // freely — tryGracefulShutdown polls for up to 200ms, which
+                        // would freeze the render thread and swallow the animation
+                        // entirely if called synchronously here.
+                        this->spawnIpcThread([this, module]() {
+                            bool exited = tryGracefulShutdown(module);
 
-                        // Force-kill fallback for dynamic modules only.
-                        // isRunning() re-check avoids a redundant terminate call
-                        // in the race where the process exited between the timeout
-                        // expiry and here.
-                        if (!exited && this->isRunning(module)) {
-                            pmshellTerminateProgram(module.programId);
-                        }
+                            // Force-kill fallback for dynamic modules only.
+                            // isRunning() re-check avoids a redundant terminate call
+                            // in the race where the process exited between the timeout
+                            // expiry and here.
+                            if (!exited && this->isRunning(module)) {
+                                pmshellTerminateProgram(module.programId);
+                            }
+                        });
                     } else {
-                        /* Start process. */
-                        const NcmProgramLocation programLocation{
-                            .program_id = module.programId,
-                            .storageID = NcmStorageId_None,
-                        };
-                        u64 pid = 0;
-                        pmshellLaunchProgram(0, &programLocation, &pid);
+                        // Run on a background thread — pmshellLaunchProgram blocks
+                        // until the process is actually created, which was eating the
+                        // whole click-animation window before a single frame rendered.
+                        this->spawnIpcThread([module]() {
+                            /* Start process. */
+                            const NcmProgramLocation programLocation{
+                                .program_id = module.programId,
+                                .storageID = NcmStorageId_None,
+                            };
+                            u64 pid = 0;
+                            pmshellLaunchProgram(0, &programLocation, &pid);
+                        });
                     }
                     return true;
 
@@ -290,21 +304,35 @@ GuiMain::GuiMain() {
                     // Static module WITH graceful-shutdown contract.
                     // Can be started and stopped via the overlay.
                     // On stop: graceful shutdown only — NEVER force-kill.
-                    //   If the call fails or times out, the toggle does nothing
-                    //   and state is unchanged.
+                    //   If the IPC doesn't exist, the command is rejected, or the
+                    //   process doesn't exit within the timeout, tryGracefulShutdown
+                    //   returns false and a notification is posted so the user knows
+                    //   the toggle did not take effect. State is unchanged.
                     // On start: launch normally via pmshell.
                     // -----------------------------------------------------------
                     if (this->isRunning(module)) {
-                        tryGracefulShutdown(module);
-                        // Whether it succeeded or failed, the key was handled.
-                        // GuiMain::update() will reflect actual state next tick.
+                        // Background thread — same reasoning as the dynamic path above.
+                        this->spawnIpcThread([this, module]() {
+                            const bool exited = tryGracefulShutdown(module);
+                            if (!exited) {
+                                // IPC unavailable, rejected, or timed out — state is
+                                // unchanged. Fire a notification so the user knows.
+                                if (tsl::notification)
+                                    tsl::notification->showNow(ult::NOTIFY_HEADER + ovls::SHUTDOWN_IPC_FAILED, 22);
+                            }
+                            // If exited == true, update() will flip the label to "Off"
+                            // on the next tick — no manual setValue needed.
+                        });
                     } else {
-                        const NcmProgramLocation programLocation{
-                            .program_id = module.programId,
-                            .storageID = NcmStorageId_None,
-                        };
-                        u64 pid = 0;
-                        pmshellLaunchProgram(0, &programLocation, &pid);
+                        // Background thread — same reasoning as the dynamic path above.
+                        this->spawnIpcThread([module]() {
+                            const NcmProgramLocation programLocation{
+                                .program_id = module.programId,
+                                .storageID = NcmStorageId_None,
+                            };
+                            u64 pid = 0;
+                            pmshellLaunchProgram(0, &programLocation, &pid);
+                        });
                     }
                     return true;
                 }
@@ -348,6 +376,11 @@ GuiMain::GuiMain() {
 GuiMain::~GuiMain() {
     // Signal that we're shutting down to skip any pending updates
     m_isActive = false;
+
+    // Join any in-flight IPC thread so we don't destroy the std::thread
+    // object while it's still running (that would call std::terminate).
+    if (m_ipcThread.joinable())
+        m_ipcThread.join();
     
     // Fast cleanup - vector destructor handles the rest
     //m_sysmoduleListItems.clear();
@@ -375,10 +408,10 @@ inline void drawMemoryWidget(auto renderer) {
         
         if (freeRamBytes >= 1024ULL * 1024 * 1024) {
             value = static_cast<float>(freeRamBytes) / (1024.0f * 1024.0f * 1024.0f);
-            unit = "GB";
+            unit = "ГБ";
         } else {
             value = static_cast<float>(freeRamBytes) / (1024.0f * 1024.0f);
-            unit = "MB";
+            unit = "МБ";
         }
         
         int decimalPlaces;
@@ -392,7 +425,7 @@ inline void drawMemoryWidget(auto renderer) {
             decimalPlaces = 3;
         }
         
-        std::snprintf(ramString, sizeof(ramString), "%.*f %s %s", decimalPlaces, value, unit, ult::FREE.c_str());
+        std::snprintf(ramString, sizeof(ramString), "%.*f %s %s", decimalPlaces, value, unit, ovls::FREE_LABEL.c_str());
         
         const float freeRamMB = static_cast<float>(freeRamBytes) / (1024.0f * 1024.0f);
         
@@ -425,10 +458,25 @@ inline void drawMemoryWidget(auto renderer) {
         }
     }
     if (!ult::hideWidgetBorder) {
+        // Mirror drawWidget()'s animated colour-wheel border: identical anchor
+        // colours, 10s rotation and reverseFlow=false, gated by the same
+        // ult::dynamicWidgetBorder toggle. When that's off, &w2 -> nullptr and
+        // the border is the plain widgetBorderColor exactly as before.
+        const tsl::Switch2Wheel w2 = tsl::makeSwitch2Wheel(
+            tsl::s2WidgetBorderColor1,      // anchor[0] UR -- fixed peak
+            tsl::s2WidgetBorderColor2,      // anchor[2] LL -- fixed peak
+            tsl::s2WidgetBorderColor3,      // anchor[1] LR -- hero bright
+            tsl::s2WidgetBorderColor3Deep,  // anchor[1] LR -- hero deep
+            tsl::s2WidgetBorderColor4,      // anchor[3] UL -- hero bright
+            tsl::s2WidgetBorderColor4Deep,  // anchor[3] UL -- hero deep
+            10.0,
+            false
+        );
         renderer->drawUniformRoundedRectBorder(
             245, 15,
             (ult::extendedWidgetBackdrop ? tsl::cfg::FramebufferWidth - 255 : tsl::cfg::FramebufferWidth - 215),
-            66, 3, renderer->a(tsl::widgetBorderColor)
+            66, 3, renderer->a(tsl::widgetBorderColor),
+            ult::dynamicWidgetBorder ? &w2 : nullptr
         );
     }
 
@@ -436,7 +484,7 @@ inline void drawMemoryWidget(auto renderer) {
     
     // First line: "System" label
     size_t y_offset = 44 + 2 - 1;  // Same as the clock y_offset in the reference code
-    const char* systemLabel = ult::SYSTEM_RAM.c_str();
+    const char* systemLabel = ovls::RAM_LABEL.c_str();
     
     if (ult::centerWidgetAlignment) {
         const int labelWidth = renderer->getTextDimensions(systemLabel, false, 20).first;
@@ -473,7 +521,7 @@ tsl::elm::Element* GuiMain::createUI() {
 
         auto* warning = new tsl::elm::CustomDrawer([description](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
             renderer->drawString("\uE150", false, 180, 250, 90, tsl::headerTextColor);
-            renderer->drawString(description, false, 110, 340, 25, tsl::headerTextColor);
+            renderer->drawString(description.c_str(), false, 110, 340, 25, tsl::headerTextColor);
         });
 
         rootFrame->setContent(warning);
@@ -485,12 +533,10 @@ tsl::elm::Element* GuiMain::createUI() {
         // be stopped safely at runtime even though they require a reboot to
         // start; grouping them here makes them interactable in the overlay.
         sysmoduleList->addItem(new tsl::elm::CategoryHeader(ovls::DYNAMIC_HEADER, true));
-        {
-            const std::string dynHint = ovls::DYNAMIC_HINT;
-            sysmoduleList->addItem(new tsl::elm::CustomDrawer([dynHint](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
-                renderer->drawString(dynHint.c_str(), false, x + 5, y + 13, 15, tsl::warningTextColor);
-            }), 30);
-        }
+        const std::string dynamicHint = ovls::DYNAMIC_HINT;
+        sysmoduleList->addItem(new tsl::elm::CustomDrawer([dynamicHint](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
+            renderer->drawString(dynamicHint.c_str(), false, x + 5, y + 13, 15, tsl::warningTextColor);
+        }), 30);
         for (const auto& module : this->m_sysmoduleListItems) {
             if (!module.needReboot || module.hasGracefulShutdown) {
                 module.listItem->enableShortHoldKey();
@@ -501,12 +547,10 @@ tsl::elm::Element* GuiMain::createUI() {
         // Static section: modules that require a reboot AND have no
         // graceful-shutdown contract. These cannot be toggled at runtime.
         sysmoduleList->addItem(new tsl::elm::CategoryHeader(ovls::STATIC_HEADER, true));
-        {
-            const std::string statHint = ovls::STATIC_HINT;
-            sysmoduleList->addItem(new tsl::elm::CustomDrawer([statHint](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
-                renderer->drawString(statHint.c_str(), false, x + 5, y + 13, 15, tsl::warningTextColor);
-            }), 30);
-        }
+        const std::string staticHint = ovls::STATIC_HINT;
+        sysmoduleList->addItem(new tsl::elm::CustomDrawer([staticHint](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
+            renderer->drawString(staticHint.c_str(), false, x + 5, y + 13, 15, tsl::warningTextColor);
+        }), 30);
         for (const auto& module : this->m_sysmoduleListItems) {
             if (module.needReboot && !module.hasGracefulShutdown) {
                 module.listItem->enableShortHoldKey();
@@ -525,7 +569,33 @@ void GuiMain::update() {
     // Early exit if shutting down - avoids unnecessary work during cleanup
     if (!m_isActive)
         return;
-        
+
+    // Reap a finished IPC thread. m_ipcDone is set by the thread itself just
+    // before it returns, so this join is always instantaneous — we never wait.
+    if (m_ipcDone.load(std::memory_order_acquire) && m_ipcThread.joinable())
+        m_ipcThread.join();
+
+    // Grey out the A+OK footer hint when the focused item is a static module
+    // (needReboot=true, no graceful shutdown) — pressing A on these does nothing
+    // actionable, so the focused color would be misleading. tsl's own loop will
+    // snap it back to true the instant focus moves to any other element, so
+    // there is no risk of it staying grey if the user navigates away.
+    {
+        tsl::elm::Element* focused = this->getFocusedElement();
+        bool onStatic = false;
+        if (focused) {
+            for (const auto& module : m_sysmoduleListItems) {
+                if (module.needReboot && !module.hasGracefulShutdown &&
+                    module.listItem == focused) {
+                    onStatic = true;
+                    break;
+                }
+            }
+        }
+        if (onStatic)
+            selectIsUsingFocusedColor = false;
+    }
+
     static u32 counter = 0;
 
     // Check every 30 frames (~0.5 seconds at 60fps)
@@ -535,6 +605,41 @@ void GuiMain::update() {
     for (const auto& module : this->m_sysmoduleListItems) {
         this->updateStatus(module);
     }
+}
+
+// ----------------------------------------------------------------------------
+// spawnIpcThread
+//
+// Runs `action` on a dedicated std::thread so the render thread never blocks
+// mid-animation. The click animation is stamped at KEY_A press time inside
+// ListItem::onClick and plays on the render thread — if the IPC call that
+// follows (pmshellLaunchProgram, pmshellTerminateProgram, or the 200ms
+// tryGracefulShutdown polling loop) ran on the same thread it would freeze
+// every frame until it returned, cutting the animation short or killing it
+// entirely before a single frame could render it.
+//
+// Serialisation: if a previous thread is still alive when a new click fires,
+// we join it first. In practice the old thread is already finished or within
+// milliseconds of finishing (the user's reaction time is >100ms; the IPC
+// calls complete well before that), so the join is effectively free.
+//
+// Lifetime: the thread sets m_ipcDone = true just before returning.
+// update() sees that flag and calls join() on the next tick — a guaranteed
+// instant join since the thread has already exited. This keeps std::thread
+// in a valid, joinable-until-reaped state and avoids detach() (which would
+// let a dying thread touch freed GuiMain memory after the overlay closes).
+// ----------------------------------------------------------------------------
+void GuiMain::spawnIpcThread(std::function<void()> action) {
+    // Serialise: join any previous thread that is still technically live.
+    // This is the "overlapping click" guard — extremely rare, essentially free.
+    if (m_ipcThread.joinable())
+        m_ipcThread.join();
+
+    m_ipcDone.store(false, std::memory_order_release);
+    m_ipcThread = std::thread([this, action = std::move(action)]() {
+        action();
+        m_ipcDone.store(true, std::memory_order_release);
+    });
 }
 
 bool GuiMain::handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState leftJoyStick, HidAnalogStickState rightJoyStick) {
@@ -579,6 +684,13 @@ void GuiMain::updateStatus(const SystemModule &module) {
     const bool hasFlag = this->hasFlag(module);
 
     module.listItem->setValue(statusDescription(running, hasFlag), !running);
+
+    // Switch 2 style: the sliding pill mirrors the running state and the circle
+    // colour mirrors the auto-start (boot2) flag. Both are no-ops in legacy
+    // style (drawValue ignores them there). setRunning only animates on a real
+    // change; the first call here snaps to the true state with no slide.
+    module.listItem->setRunning(running);
+    module.listItem->setAutoStart(hasFlag);
 }
 
 bool GuiMain::hasFlag(const SystemModule &module) {

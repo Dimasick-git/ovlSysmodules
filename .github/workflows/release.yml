@@ -1,143 +1,176 @@
-name: Release
-
-defaults:
-  run:
-    shell: bash
+name: Сборка и релиз
 
 on:
   push:
     branches: [main]
-    tags: ['v*.*.*']
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: ovlsysmodules-release-main
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build & publish release if APP_VERSION changed
+  build:
+    name: Сборка пакета
     runs-on: ubuntu-latest
     container:
       image: devkitpro/devkita64:latest
 
+    outputs:
+      app_version: ${{ steps.version.outputs.app_version }}
+      package_name: ${{ steps.package.outputs.package_name }}
+      checksum_name: ${{ steps.package.outputs.checksum_name }}
+      checksum: ${{ steps.package.outputs.checksum }}
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - name: Получение исходников
+        uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Mark workspace as safe for git
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Install switch libs
-        run: dkp-pacman -S --noconfirm --needed switch-libpng switch-curl switch-zziplib switch-mbedtls switch-libjpeg-turbo
-
-      - name: Resolve target tag and check if release exists
-        id: tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Подготовка зависимостей
         run: |
-          set -e
-          APP_VERSION=$(grep -E '^APP_VERSION\s*:=' Makefile | sed -E 's/.*:=\s*//;s/\s*$//')
-          if [ -z "$APP_VERSION" ]; then
-            echo "::error::Could not extract APP_VERSION from Makefile."
+          dkp-pacman -S --noconfirm --needed \
+            switch-libpng switch-curl switch-zziplib switch-mbedtls \
+            switch-libjpeg-turbo
+
+      - name: Определение версии
+        id: version
+        run: |
+          set -euo pipefail
+          APP_VERSION=$(sed -nE 's/^APP_VERSION[[:space:]]*:=[[:space:]]*([^[:space:]]+).*/\1/p' Makefile)
+          test -n "$APP_VERSION"
+          case "$APP_VERSION" in
+            *[!0-9.]*|*..*|.*|*.)
+              echo "Некорректная APP_VERSION: $APP_VERSION" >&2
+              exit 1
+              ;;
+          esac
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Проверка русских строк
+        run: python3 scripts/check_translation_lengths.py
+
+      - name: Сборка overlay
+        run: make -j"$(nproc)"
+
+      - name: Упаковка для SD-карты
+        id: package
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          ROOT="dist/ovlSysmodules-v${APP_VERSION}"
+          PACKAGE_NAME="ovlSysmodules-v${APP_VERSION}.zip"
+          CHECKSUM_NAME="${PACKAGE_NAME}.sha256"
+          mkdir -p "$ROOT/switch/.overlays" "$ROOT/config/ryazhahand/ovlSysmodules/lang"
+          install -m 0644 ovlSysmodules.ovl "$ROOT/switch/.overlays/ovlSysmodules.ovl"
+          install -m 0644 lang/ru.json "$ROOT/config/ryazhahand/ovlSysmodules/lang/ru.json"
+          (cd dist && zip -qr "$PACKAGE_NAME" "ovlSysmodules-v${APP_VERSION}")
+          (cd dist && sha256sum "$PACKAGE_NAME" > "$CHECKSUM_NAME")
+          echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "checksum_name=$CHECKSUM_NAME" >> "$GITHUB_OUTPUT"
+          echo "checksum=$(cut -d' ' -f1 "dist/$CHECKSUM_NAME")" >> "$GITHUB_OUTPUT"
+
+      - name: Сохранение пакета
+        uses: actions/upload-artifact@v4
+        with:
+          name: ovlSysmodules-${{ github.sha }}
+          path: |
+            dist/${{ steps.package.outputs.package_name }}
+            dist/${{ steps.package.outputs.checksum_name }}
+          if-no-files-found: error
+
+  release:
+    name: Публикация релиза
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Получение истории и тегов
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Определение режима релиза
+        id: release
+        env:
+          APP_VERSION: ${{ needs.build.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          TAG="v${APP_VERSION}"
+          LATEST_TAG=$(git tag -l 'v[0-9]*' --sort=-version:refname | head -n 1 || true)
+          LATEST_VERSION=${LATEST_TAG#v}
+
+          if [ -z "$LATEST_TAG" ]; then
+            MODE=create
+          elif [ "$APP_VERSION" = "$LATEST_VERSION" ]; then
+            MODE=replace
+          elif printf '%s\n%s\n' "$LATEST_VERSION" "$APP_VERSION" | sort -V -C; then
+            MODE=create
+          else
+            echo "APP_VERSION ($APP_VERSION) ниже последнего тега ($LATEST_TAG)." >&2
             exit 1
           fi
 
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-          else
-            TAG="v${APP_VERSION}"
-          fi
-
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $TAG already exists — skipping (idempotent)."
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "Will publish: $TAG"
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "Последний тег: ${LATEST_TAG:-нет}; режим: $MODE; целевой тег: $TAG"
 
-      - name: Create & push tag
-        if: steps.tag.outputs.should_release == 'true' && !startsWith(github.ref, 'refs/tags/')
+      - name: Создание тега новой версии
+        if: steps.release.outputs.mode == 'create'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
-          set -e
-          TAG="${{ steps.tag.outputs.tag }}"
-          if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
-            git config user.name  'Dimasick-git'
-            git config user.email 'dimaorynchukk@gmail.com'
-            git tag -a "$TAG" -m "Auto-release on APP_VERSION change: $TAG"
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            git config user.name "Dimasick-git"
+            git config user.email "dimaorynchukk@gmail.com"
+            git tag -a "$TAG" -m "Автоматический релиз $TAG" "$GITHUB_SHA"
             git push origin "$TAG"
           fi
 
-      - name: make
-        if: steps.tag.outputs.should_release == 'true'
-        run: make -j$(nproc)
-
-      - name: Package SD-layout zip
-        id: zip
-        if: steps.tag.outputs.should_release == 'true'
-        run: |
-          set -e
-          NAME="ovlSysmodules-${APP_VERSION}-${GITHUB_SHA::7}"
-          DIST="dist/${NAME}"
-          mkdir -p "${DIST}/switch/.overlays"
-          mkdir -p "${DIST}/config/ryazhahand/ovlSysmodules/lang"
-          cp ovlSysmodules.ovl "${DIST}/switch/.overlays/"
-          cp lang/*.json        "${DIST}/config/ryazhahand/ovlSysmodules/lang/"
-          (cd dist && zip -r "${NAME}.zip" "${NAME}")
-          (cd dist && sha256sum "${NAME}.zip" > "${NAME}.zip.sha256")
-          echo "path=dist/${NAME}.zip"  >> "$GITHUB_OUTPUT"
-          echo "name=${NAME}.zip"        >> "$GITHUB_OUTPUT"
-          echo "sha256=$(cut -d' ' -f1 < dist/${NAME}.zip.sha256)" >> "$GITHUB_OUTPUT"
-
-      - name: Extract changelog section
-        id: changelog
-        if: steps.tag.outputs.should_release == 'true'
-        run: |
-          set -e
-          TAG="${{ steps.tag.outputs.tag }}"
-          TAG_NO_V="${TAG#v}"
-          BODY=$(awk -v tag="$TAG_NO_V" '
-            $0 ~ "^## \[" tag "\]" {flag=1; next}
-            flag && /^## \[/ {flag=0}
-            flag {print}
-          ' CHANGELOG.md)
-          if [ -z "$BODY" ]; then
-            BODY="Auto-built release. See [CHANGELOG.md](CHANGELOG.md) for full history."
-          fi
-          {
-            echo 'body<<DELIM'
-            echo "$BODY"
-            echo ''
-            echo '---'
-            echo ''
-            echo "**SHA-256**: \`${{ steps.zip.outputs.sha256 }}\`"
-            echo "**Built from**: \`${GITHUB_SHA::7}\`"
-            echo 'DELIM'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Publish GitHub Release
-        if: steps.tag.outputs.should_release == 'true'
-        uses: softprops/action-gh-release@v3
+      - name: Получение пакета
+        uses: actions/download-artifact@v4
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ovlSysmodules ${{ steps.tag.outputs.tag }}
-          body: ${{ steps.changelog.outputs.body }}
-          files: |
-            ${{ steps.zip.outputs.path }}
-            dist/${{ steps.zip.outputs.name }}.sha256
-          draft: false
-          prerelease: false
+          name: ovlSysmodules-${{ github.sha }}
+          path: release-assets
+
+      - name: Создание или обновление релиза
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          MODE: ${{ steps.release.outputs.mode }}
+          APP_VERSION: ${{ needs.build.outputs.app_version }}
+          PACKAGE_NAME: ${{ needs.build.outputs.package_name }}
+          CHECKSUM_NAME: ${{ needs.build.outputs.checksum_name }}
+          CHECKSUM: ${{ needs.build.outputs.checksum }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat <<EOF
+          Автоматическая сборка из коммита \`${GITHUB_SHA::7}\`.
+
+          Режим: **${MODE}**. При совпадении APP_VERSION с последним тегом файлы релиза заменяются сборкой текущего коммита.
+
+          SHA-256 \`${PACKAGE_NAME}\`: \`${CHECKSUM}\`
+          EOF
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "ovlSysmodules $TAG" --notes "$BODY"
+            gh release view "$TAG" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
+              [ -z "$asset" ] || gh release delete-asset "$TAG" "$asset" --yes
+            done
+          else
+            gh release create "$TAG" --title "ovlSysmodules $TAG" --notes "$BODY"
+          fi
+
+          gh release upload "$TAG" \
+            "release-assets/$PACKAGE_NAME" \
+            "release-assets/$CHECKSUM_NAME" \
+            --clobber

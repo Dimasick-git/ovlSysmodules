@@ -1,83 +1,18 @@
 #include "ovls_lang.hpp"
 
-#include <cstdio>
-#include <cstring>
-#include <cstdlib>
-#include <cJSON.h>
-
 namespace ovls {
 
-    // English defaults preserved byte-for-byte from upstream gui_main.cpp,
-    // including the Switch system-font glyphs:
-    //     =  U+E016  info icon (prefixed before hints)
-    //     =  U+E031  small separator dot
-    //     =  U+E0E0  A button glyph
-    //     =  U+E0E3  Y button glyph
-    // Translations in lang/<code>.json keep these glyphs verbatim so the
-    // localised header still tells the user which buttons do what.
-    std::string OVERLAY_TITLE       = "Sysmodules";
-    std::string ON_LABEL            = "On";
-    std::string OFF_LABEL           = "Off";
-    std::string NO_SYSMODULES_FOUND = "No sysmodules found!";
-    std::string SCAN_FAILED         = "Scan failed!";
-    std::string DYNAMIC_HEADER      = "Dynamic   Auto Start   Toggle";
-    std::string DYNAMIC_HINT        = " These sysmodules can be toggled at any time.";
-    std::string STATIC_HEADER       = "Static   Auto Start";
-    std::string STATIC_HINT         = " These sysmodules need a reboot to work.";
-
-    namespace {
-
-        struct Entry { const char *key; std::string *dst; };
-        const Entry kTable[] = {
-            { "OVERLAY_TITLE",       &OVERLAY_TITLE       },
-            { "ON_LABEL",            &ON_LABEL            },
-            { "OFF_LABEL",           &OFF_LABEL           },
-            { "NO_SYSMODULES_FOUND", &NO_SYSMODULES_FOUND },
-            { "SCAN_FAILED",         &SCAN_FAILED         },
-            { "DYNAMIC_HEADER",      &DYNAMIC_HEADER      },
-            { "DYNAMIC_HINT",        &DYNAMIC_HINT        },
-            { "STATIC_HEADER",       &STATIC_HEADER       },
-            { "STATIC_HINT",         &STATIC_HINT         },
-        };
-
-        bool loadFile(const char *path) {
-            std::FILE *fp = std::fopen(path, "rb");
-            if (!fp) return false;
-            std::fseek(fp, 0, SEEK_END);
-            long size = std::ftell(fp);
-            if (size <= 0 || size > 32 * 1024) { std::fclose(fp); return false; }
-            std::fseek(fp, 0, SEEK_SET);
-
-            char *buf = static_cast<char *>(std::malloc(size + 1));
-            if (!buf) { std::fclose(fp); return false; }
-            size_t got = std::fread(buf, 1, size, fp);
-            std::fclose(fp);
-            if (got != static_cast<size_t>(size)) { std::free(buf); return false; }
-            buf[size] = 0;  // null-terminate (cJSON_ParseWithLength uses size, but be safe)
-
-            cJSON *root = cJSON_ParseWithLength(buf, size);
-            std::free(buf);
-            if (!root) return false;
-
-            for (const Entry &e : kTable) {
-                cJSON *item = cJSON_GetObjectItem(root, e.key);
-                if (item && cJSON_IsString(item) && item->valuestring && item->valuestring[0]) {
-                    *e.dst = item->valuestring;
-                }
-            }
-            cJSON_Delete(root);
-            return true;
-        }
-
-    } // namespace
-
-    void loadLanguage(const std::string &langCode) {
-        if (langCode.empty()) return;
-        char path[256];
-        std::snprintf(path, sizeof(path),
-                      "sdmc:/config/ryazhahand/ovlSysmodules/lang/%s.json",
-                      langCode.c_str());
-        loadFile(path);
-    }
+const std::string OVERLAY_TITLE       = "Сисмодули";
+const std::string ON_LABEL            = "Вкл";
+const std::string OFF_LABEL           = "Выкл";
+const std::string NO_SYSMODULES_FOUND = "Модули не найдены!";
+const std::string SCAN_FAILED         = "Сбой скана!";
+const std::string DYNAMIC_HEADER      = "Динамич.   Автозапуск   Вкл/выкл";
+const std::string DYNAMIC_HINT        = " Модули можно менять в любой миг.";
+const std::string STATIC_HEADER       = "Статика   Автозапуск";
+const std::string STATIC_HINT         = " Модулям нужен перезапуск.";
+const std::string SHUTDOWN_IPC_FAILED = "Сбой IPC-выключения.";
+const std::string RAM_LABEL           = "ОЗУ";
+const std::string FREE_LABEL          = "своб.";
 
 } // namespace ovls

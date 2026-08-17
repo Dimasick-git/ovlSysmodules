@@ -37,9 +37,8 @@ include $(DEVKITPRO)/libnx/switch_rules
 #   of a homebrew executable (.nro). This is intended to be used for sysmodules.
 #   NACP building is skipped as well.
 #---------------------------------------------------------------------------------
-APP_TITLE	:=	Sysmodules
-APP_AUTHOR	:=	Dimasick-git (fork of ppkantorski/ovl-sysmodules)
-APP_VERSION	:=	1.5.2
+APP_TITLE	:=	Сисмодули
+APP_VERSION	:=	1.5.3
 
 TARGET		:=	ovlSysmodules
 BUILD		:=	build
@@ -47,9 +46,8 @@ SOURCES		:=	source
 DATA		:=	data
 INCLUDES	:=  include
 
-# Ryazhenka: swapped ppkantorski/libultrahand for our drop-in fork
-# Dimasick-git/libryazhahand (same API/namespaces, /config/ryazhahand/
-# config path, RYZHAND_* symbol prefix).
+# Библиотека Ryazhahand — форк libultrahand с пространством настроек
+# /config/ryazhahand/ и совместимым API tsl::/ult::.
 include ${TOPDIR}/libs/libryazhahand/ryazhahand.mk
 
 
@@ -88,10 +86,7 @@ CXXFLAGS := $(CFLAGS) -std=c++26 -Wno-dangling-else -ffast-math
 ASFLAGS := $(ARCH)
 LDFLAGS += -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-# Ryazhenka: added -lpng16 (libryazhahand pulls in loadPngToRGBA4444 for
-# PNG wallpapers — was raw .rgba in libultrahand) and -lminizip
-# (referenced by libryazhahand's archive helpers). Kept -lzzip from
-# upstream in case other libraries in the chain still pull it in.
+# libryazhahand использует PNG-фоны и ZIP-архивы.
 LIBS := -lpng16 -lcurl -lz -lzzip -lminizip -lmbedtls -lmbedx509 -lmbedcrypto -lnx
 
 CXXFLAGS += -fno-exceptions -ffunction-sections -fdata-sections -fno-rtti
@@ -225,11 +220,6 @@ all	:	 $(OUTPUT).ovl
 $(OUTPUT).ovl: $(OUTPUT).elf $(OUTPUT).nacp
 	@elf2nro $< $@ $(NROFLAGS)
 	@echo "built ... $(notdir $(OUTPUT).ovl)"
-	# Ryazhenka: changed trailing 4-byte signature from 'ULTR' (Ultrahand)
-	# to 'RYZH' (Ryazhahand) so overlay-managers in the Ryazha stack
-	# (Ryazhahand-Overlay, nx-ovlloader visualisers) recognise this as a
-	# Ryazha-native overlay. nx-ovlloader itself does not validate the
-	# trailing bytes, so changing the magic does not break loading.
 	@printf 'RYZH' >> $@
 	@printf "Ryazhahand signature has been added.\n"
 
