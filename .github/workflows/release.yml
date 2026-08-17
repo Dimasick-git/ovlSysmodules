@@ -1,5 +1,9 @@
 name: Сборка и релиз
 
+defaults:
+  run:
+    shell: bash
+
 on:
   push:
     branches: [main]
