@@ -26,7 +26,6 @@ jobs:
     outputs:
       app_version: ${{ steps.version.outputs.app_version }}
       package_name: ${{ steps.package.outputs.package_name }}
-      checksum_name: ${{ steps.package.outputs.checksum_name }}
       checksum: ${{ steps.package.outputs.checksum }}
 
     steps:
@@ -64,29 +63,22 @@ jobs:
 
       - name: Упаковка для SD-карты
         id: package
-        env:
-          APP_VERSION: ${{ steps.version.outputs.app_version }}
         run: |
           set -euo pipefail
-          ROOT="dist/ovlSysmodules-v${APP_VERSION}"
-          PACKAGE_NAME="ovlSysmodules-v${APP_VERSION}.zip"
-          CHECKSUM_NAME="${PACKAGE_NAME}.sha256"
+          ROOT="dist/sd-root"
+          PACKAGE_NAME="ovlSysmodules.zip"
           mkdir -p "$ROOT/switch/.overlays" "$ROOT/config/ryazhahand/ovlSysmodules/lang"
           install -m 0644 ovlSysmodules.ovl "$ROOT/switch/.overlays/ovlSysmodules.ovl"
           install -m 0644 lang/ru.json "$ROOT/config/ryazhahand/ovlSysmodules/lang/ru.json"
-          (cd dist && zip -qr "$PACKAGE_NAME" "ovlSysmodules-v${APP_VERSION}")
-          (cd dist && sha256sum "$PACKAGE_NAME" > "$CHECKSUM_NAME")
+          (cd "$ROOT" && zip -qr "../$PACKAGE_NAME" .)
           echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
-          echo "checksum_name=$CHECKSUM_NAME" >> "$GITHUB_OUTPUT"
-          echo "checksum=$(cut -d' ' -f1 "dist/$CHECKSUM_NAME")" >> "$GITHUB_OUTPUT"
+          echo "checksum=$(sha256sum "dist/$PACKAGE_NAME" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Сохранение пакета
         uses: actions/upload-artifact@v4
         with:
           name: ovlSysmodules-${{ github.sha }}
-          path: |
-            dist/${{ steps.package.outputs.package_name }}
-            dist/${{ steps.package.outputs.checksum_name }}
+          path: dist/${{ steps.package.outputs.package_name }}
           if-no-files-found: error
 
   release:
@@ -152,7 +144,6 @@ jobs:
           MODE: ${{ steps.release.outputs.mode }}
           APP_VERSION: ${{ needs.build.outputs.app_version }}
           PACKAGE_NAME: ${{ needs.build.outputs.package_name }}
-          CHECKSUM_NAME: ${{ needs.build.outputs.checksum_name }}
           CHECKSUM: ${{ needs.build.outputs.checksum }}
         run: |
           set -euo pipefail
@@ -167,14 +158,12 @@ jobs:
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "ovlSysmodules $TAG" --notes "$BODY"
-            gh release view "$TAG" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
-              [ -z "$asset" ] || gh release delete-asset "$TAG" "$asset" --yes
-            done
           else
             gh release create "$TAG" --title "ovlSysmodules $TAG" --notes "$BODY"
           fi
 
-          gh release upload "$TAG" \
-            "release-assets/$PACKAGE_NAME" \
-            "release-assets/$CHECKSUM_NAME" \
-            --clobber
+          # При ошибке upload старый asset остаётся нетронутым.
+          gh release upload "$TAG" "release-assets/$PACKAGE_NAME" --clobber
+          gh release view "$TAG" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
+            [ -z "$asset" ] || [ "$asset" = "$PACKAGE_NAME" ] || gh release delete-asset "$TAG" "$asset" --yes
+          done
