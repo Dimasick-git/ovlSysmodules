@@ -47,7 +47,8 @@ jobs:
         run: python3 scripts/check_translation_lengths.py
 
       - name: Build distribution package
-        run: make -j"$(nproc)"
+        run: |
+          make -j"$(nproc)"
           mkdir -p dist/sd-root/switch/.overlays dist/sd-root/config/ryazhahand/ovlSysmodules/lang
           cp ovlSysmodules.ovl dist/sd-root/switch/.overlays/
           cp lang/ru.json dist/sd-root/config/ryazhahand/ovlSysmodules/lang/

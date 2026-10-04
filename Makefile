@@ -87,7 +87,7 @@ ASFLAGS := $(ARCH)
 LDFLAGS += -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,-Map,$(notdir $*.map)
 
 # libryazhahand использует PNG-фоны и ZIP-архивы.
-LIBS := -lpng16 -lcurl -lz -lzzip -lminizip -lmbedtls -lmbedx509 -lmbedcrypto -lnx
+LIBS := -lpng16 -lcurl -lz -lminizip -lmbedtls -lmbedx509 -lmbedcrypto -lnx
 
 CXXFLAGS += -fno-exceptions -ffunction-sections -fdata-sections -fno-rtti
 LDFLAGS += -Wl,--gc-sections -Wl,--as-needed
