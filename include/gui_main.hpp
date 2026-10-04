@@ -30,12 +30,12 @@
 // Legacy (non Switch 2) style is untouched: drawValue falls back to the base
 // ON/OFF value text (including its existing auto-start glyph prefix).
 // ===========================================================================
-class AutoStartToggleListItem : public tsl::elm::ListItem {
+class AutoStartToggleListItem : public tsl::elm::CompactListItem {
 public:
     // value is the initial ON/OFF text used in legacy style; it also keeps
     // m_value non-empty so the Switch 2 pill renders before the first poll.
     AutoStartToggleListItem(const std::string& text, const std::string& value)
-        : tsl::elm::ListItem(text, value) {}
+        : tsl::elm::CompactListItem(text, value) {}
 
     virtual ~AutoStartToggleListItem() {}
 

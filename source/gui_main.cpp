@@ -487,23 +487,23 @@ inline void drawMemoryWidget(auto renderer) {
     const char* systemLabel = ovls::RAM_LABEL.c_str();
     
     if (ult::centerWidgetAlignment) {
-        const int labelWidth = renderer->getTextDimensions(systemLabel, false, 20).first;
-        renderer->drawString(systemLabel, false, backdropCenterX - (labelWidth >> 1), y_offset, 20, tsl::headerTextColor);
+        const int labelWidth = renderer->getTextDimensions(systemLabel, false, 17).first;
+        renderer->drawString(systemLabel, false, backdropCenterX - (labelWidth >> 1), y_offset, 17, tsl::headerTextColor);
     } else {
-        const int labelWidth = renderer->getTextDimensions(systemLabel, false, 20).first;
-        renderer->drawString(systemLabel, false, tsl::cfg::FramebufferWidth - labelWidth - 25, y_offset, 20, tsl::headerTextColor);
+        const int labelWidth = renderer->getTextDimensions(systemLabel, false, 17).first;
+        renderer->drawString(systemLabel, false, tsl::cfg::FramebufferWidth - labelWidth - 25, y_offset, 17, tsl::headerTextColor);
     }
     
     // Second line: RAM info
     y_offset += 22;  // Same spacing as in the reference code
     
     if (ult::centerWidgetAlignment) {
-        const int ramWidth = renderer->getTextDimensions(ramString, false, 20).first;
+        const int ramWidth = renderer->getTextDimensions(ramString, false, 17).first;
         const int currentX = backdropCenterX - (ramWidth >> 1);
-        renderer->drawString(ramString, false, currentX, y_offset, 20, ramColor);
+        renderer->drawString(ramString, false, currentX, y_offset, 17, ramColor);
     } else {
-        const s32 ramWidth = renderer->getTextDimensions(ramString, false, 20).first;
-        renderer->drawString(ramString, false, tsl::cfg::FramebufferWidth - ramWidth - 25, y_offset, 20, ramColor);
+        const s32 ramWidth = renderer->getTextDimensions(ramString, false, 17).first;
+        renderer->drawString(ramString, false, tsl::cfg::FramebufferWidth - ramWidth - 25, y_offset, 17, ramColor);
     }
 }
 
@@ -519,11 +519,8 @@ tsl::elm::Element* GuiMain::createUI() {
     if (this->m_sysmoduleListItems.size() == 0) {
         const std::string description = this->m_scanned ? ovls::NO_SYSMODULES_FOUND : ovls::SCAN_FAILED;
 
-        auto* warning = new tsl::elm::CustomDrawer([description](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
-            renderer->drawString("\uE150", false, 180, 250, 90, tsl::headerTextColor);
-            renderer->drawString(description.c_str(), false, 110, 340, 25, tsl::headerTextColor);
-        });
-
+        auto* warning = new tsl::elm::List();
+        warning->addItem(new tsl::elm::CompactDescription(description));
         rootFrame->setContent(warning);
     } else {
         tsl::elm::List* sysmoduleList = new tsl::elm::List();
@@ -532,11 +529,9 @@ tsl::elm::Element* GuiMain::createUI() {
         // modules that declared a graceful-shutdown contract. The latter can
         // be stopped safely at runtime even though they require a reboot to
         // start; grouping them here makes them interactable in the overlay.
-        sysmoduleList->addItem(new tsl::elm::CategoryHeader(ovls::DYNAMIC_HEADER, true));
+        sysmoduleList->addItem(new tsl::elm::CompactCategoryHeader(ovls::DYNAMIC_HEADER, true));
         const std::string dynamicHint = ovls::DYNAMIC_HINT;
-        sysmoduleList->addItem(new tsl::elm::CustomDrawer([dynamicHint](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
-            renderer->drawString(dynamicHint.c_str(), false, x + 5, y + 13, 15, tsl::warningTextColor);
-        }), 30);
+        sysmoduleList->addItem(new tsl::elm::CompactDescription(dynamicHint));
         for (const auto& module : this->m_sysmoduleListItems) {
             if (!module.needReboot || module.hasGracefulShutdown) {
                 module.listItem->enableShortHoldKey();
@@ -546,11 +541,9 @@ tsl::elm::Element* GuiMain::createUI() {
 
         // Static section: modules that require a reboot AND have no
         // graceful-shutdown contract. These cannot be toggled at runtime.
-        sysmoduleList->addItem(new tsl::elm::CategoryHeader(ovls::STATIC_HEADER, true));
+        sysmoduleList->addItem(new tsl::elm::CompactCategoryHeader(ovls::STATIC_HEADER, true));
         const std::string staticHint = ovls::STATIC_HINT;
-        sysmoduleList->addItem(new tsl::elm::CustomDrawer([staticHint](tsl::gfx::Renderer* renderer, s32 x, s32 y, s32 w, s32 h) {
-            renderer->drawString(staticHint.c_str(), false, x + 5, y + 13, 15, tsl::warningTextColor);
-        }), 30);
+        sysmoduleList->addItem(new tsl::elm::CompactDescription(staticHint));
         for (const auto& module : this->m_sysmoduleListItems) {
             if (module.needReboot && !module.hasGracefulShutdown) {
                 module.listItem->enableShortHoldKey();
