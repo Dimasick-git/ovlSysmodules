@@ -48,6 +48,9 @@ INCLUDES	:=  include
 
 # Библиотека Ryazhahand — форк libultrahand с пространством настроек
 # /config/ryazhahand/ и совместимым API tsl::/ult::.
+# Glass under the UI (libryazhahand libglass): the GPU presents the frame over a live blurred game frame.
+USING_GLASS_DIRECTIVE := 1
+
 include ${TOPDIR}/libs/libryazhahand/ryazhahand.mk
 
 
