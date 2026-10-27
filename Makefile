@@ -222,6 +222,7 @@ all	:	 $(OUTPUT).ovl
 
 $(OUTPUT).ovl: $(OUTPUT).elf $(OUTPUT).nacp
 	@elf2nro $< $@ $(NROFLAGS)
+	@python $(TOPDIR)/scripts/fix_nacp_utf8.py --fix $@
 	@echo "built ... $(notdir $(OUTPUT).ovl)"
 	@printf 'RYZH' >> $@
 	@printf "Ryazhahand signature has been added.\n"
